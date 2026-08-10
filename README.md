@@ -2,6 +2,12 @@
 
 Voly is a real-time AI voice receptionist that listens, responds naturally, handles interruptions, and helps callers with appointments and enquiries.
 
+## Try it live
+
+Visit [voly-three.vercel.app](https://voly-three.vercel.app) to test the live
+voice-agent demo. Allow microphone access when prompted, then start a conversation
+with Voly.
+
 ## What it can do
 
 - Convert live speech to text with Deepgram
