@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@ricky0123/vad-react": "^0.0.30",
     "opus-media-recorder": "^0.8.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
