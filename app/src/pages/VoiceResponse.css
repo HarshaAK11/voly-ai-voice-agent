@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono&family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,600;1,700&display=swap');
+
+.voly-demo, .voly-demo * { box-sizing: border-box; }
+.voly-demo { font-family: Manrope, Arial, sans-serif; }
+.voly-demo button { font: inherit; }
+
+.voly-demo { min-height: 100vh; overflow-x: hidden; overflow-y: auto; position: fixed; inset: 0; padding: 27px clamp(22px, 6vw, 92px) 48px; background: radial-gradient(circle at 50% 20%, #254a46 0, #182d2e 25%, #101b1c 68%); color: #f7f4ee; }
+.voly-demo__glow { position: absolute; pointer-events: none; filter: blur(4px); border-radius: 50%; opacity: .42; }
+.voly-demo__glow--one { height: 440px; width: 440px; left: -200px; top: 42%; background: #145a55; }
+.voly-demo__glow--two { height: 380px; width: 380px; right: -150px; top: -90px; background: #8d5e29; opacity: .22; }
+.voly-demo__header { max-width: 1240px; margin: auto; display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 1; }
+.voly-demo__brand { display: flex; align-items: center; gap: 7px; color: inherit; text-decoration: none; font-weight: 800; letter-spacing: -.06em; font-size: 27px; }
+.voly-demo__brand img { display: block; width: 44px; height: 34px; object-fit: contain; }
+.voly-demo__badge { color: #c7d4ce; font: 11px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .08em; display: flex; gap: 8px; align-items: center; }
+.voly-demo__badge i { width: 7px; height: 7px; border-radius: 50%; background: #a7e78f; box-shadow: 0 0 12px #a7e78f; }
+.voly-demo__hero { position: relative; z-index: 1; max-width: 830px; margin: clamp(72px, 10vw, 120px) auto 65px; text-align: center; }
+.voly-demo__eyebrow { color: #e9af5d; font: 11px 'DM Mono', monospace; letter-spacing: .16em; margin: 0 0 21px; }
+.voly-demo h1 { font-size: clamp(48px, 7vw, 88px); line-height: .98; letter-spacing: -.07em; margin: 0; font-weight: 700; }
+.voly-demo h1 em { font-family: 'Playfair Display', Georgia, serif; font-weight: 600; color: #e9af5d; letter-spacing: -.06em; }
+.voly-demo__intro { color: #bdc9c4; font-size: clamp(15px, 1.6vw, 18px); line-height: 1.7; max-width: 590px; margin: 28px auto 38px; }
+.voly-demo__voice-card { margin: auto; min-height: 188px; max-width: 542px; background: rgba(248,244,235,.96); color: #142021; border-radius: 22px; display: flex; align-items: center; padding: 23px 34px; gap: 24px; text-align: left; box-shadow: 0 24px 60px rgba(0,0,0,.25); transition: transform .3s, box-shadow .3s; }
+.voly-demo__voice-card.is-listening, .voly-demo__voice-card.is-speaking { box-shadow: 0 24px 60px rgba(0,0,0,.25), 0 0 0 1px #e9af5d; }
+.voly-demo__orb-wrap { position: relative; width: 132px; height: 132px; display: grid; place-items: center; flex: 0 0 auto; }
+.voly-demo__orbit { position: absolute; border: 1px solid rgba(33,91,83,.2); border-radius: 50%; }
+.voly-demo__orbit--outer { width: 128px; height: 128px; }.voly-demo__orbit--inner { width: 104px; height: 104px; }
+.voly-demo__orb { position: relative; cursor: pointer; border: 0; width: 82px; height: 82px; border-radius: 50%; background: #245f59; color: white; display: grid; place-items: center; box-shadow: inset 0 0 0 10px rgba(255,255,255,.08); transition: transform .2s, background .2s; }.voly-demo__orb:hover { transform: scale(1.06); background: #2d746b; }
+.is-listening .voly-demo__orb, .is-speaking .voly-demo__orb { background: #c77543; animation: pulse 1.8s ease-out infinite; }.voly-demo__mic-icon { font-size: 37px; transform: rotate(-35deg); line-height: 1; }.voly-demo__stop-icon { width: 19px; height: 19px; background: #fff; border-radius: 4px; }
+.voly-demo__voice-copy { display: grid; gap: 7px; }.voly-demo__voice-copy strong { font-size: 20px; letter-spacing: -.04em; }.voly-demo__voice-copy span { font-size: 13px; color: #63716f; line-height: 1.45; }
+.voly-demo__privacy { font-size: 12px; color: #91a19c; margin: 17px 0 0; }
+.voly-demo__details { position: relative; z-index: 1; max-width: 1050px; margin: auto; border-top: 1px solid rgba(220,231,224,.17); display: grid; grid-template-columns: repeat(3, 1fr); }.voly-demo__detail { min-height: 132px; padding: 25px 28px 12px 0; display: flex; gap: 14px; border-right: 1px solid rgba(220,231,224,.17); }.voly-demo__detail + .voly-demo__detail { padding-left: 28px; }.voly-demo__detail:last-child { border-right: 0; }.voly-demo__detail > span { font: 11px 'DM Mono', monospace; color: #e9af5d; }.voly-demo__detail p { margin: 0; color: #9eafa9; font-size: 12px; line-height: 1.6; }.voly-demo__detail strong { color: #ecf2ee; display: block; font-size: 13px; margin-bottom: 5px; }
+.voly-demo__conversation { position: relative; z-index: 1; max-width: 600px; margin: 55px auto 0; padding: 25px; border: 1px solid rgba(220,231,224,.17); border-radius: 16px; background: rgba(7,16,17,.22); text-align: left; }.voly-demo__message { margin: 11px 0; color: #dce5e1; line-height: 1.5; font-size: 14px; }.voly-demo__message span { color: #e9af5d; width: 52px; display: inline-block; font: 11px 'DM Mono', monospace; }.voly-demo__message--user span { color: #91cbbd; }
+.voly-demo__footer { position: relative; z-index: 1; margin: 65px auto 0; text-align: center; color: #869692; font: 11px 'DM Mono', monospace; letter-spacing: .03em; }.voly-demo__footer a { color: #e9af5d; text-decoration: none; border-bottom: 1px solid rgba(233,175,93,.45); padding-bottom: 2px; }.voly-demo__footer a:hover { color: #f7d2a1; }
+@keyframes pulse { 50% { box-shadow: inset 0 0 0 10px rgba(255,255,255,.08), 0 0 0 13px rgba(199,117,67,.12); } }
+@media (max-width: 650px) { .voly-demo { padding: 23px 20px 35px; }.voly-demo__badge { font-size: 9px; }.voly-demo__hero { margin-top: 70px; }.voly-demo__voice-card { padding: 18px; gap: 12px; min-height: 148px; }.voly-demo__orb-wrap { width: 103px; height: 103px; }.voly-demo__orbit--outer { width: 100px; height: 100px; }.voly-demo__orbit--inner { width: 80px; height: 80px; }.voly-demo__orb { width: 64px; height: 64px; }.voly-demo__details { grid-template-columns: 1fr; }.voly-demo__detail, .voly-demo__detail + .voly-demo__detail { border-right: 0; border-bottom: 1px solid rgba(220,231,224,.17); padding: 18px 0; min-height: auto; }.voly-demo__detail:last-child { border-bottom: 0; } }

@@ -1,0 +1,36 @@
+{
+  "name": "beta-test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev:server": "nodemon index.js",
+    "dev:client": "npm run dev --prefix app",
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"cyan,magenta\" \"npm run dev:server\" \"npm run dev:client\"",
+    "build": "npm run build --prefix app",
+    "test": "node --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "concurrently": "^9.2.4"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^4.11.1",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@google-cloud/text-to-speech": "^6.3.0",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.11.0",
+    "chrono-node": "^2.8.4",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "groq-sdk": "^0.33.0",
+    "piper-js": "^0.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
