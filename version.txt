@@ -1,0 +1,261 @@
+import ffmpeg from 'fluent-ffmpeg'
+import ffmpegPath from '@ffmpeg-installer/ffmpeg'
+import { PassThrough } from 'stream'
+import { ReadableStream } from 'stream/web'
+import piperJs from 'piper-js'
+
+const { PiperTTS } = piperJs
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegPath.path)
+
+/**
+ * PCM Streaming Service
+ * Converts MP3/Opus audio streams to PCM chunks for Web Audio API
+ */
+export class PCMStreamer {
+  constructor(socket, sampleRate = 24000, channels = 1) {
+    this.socket = socket
+    this.sampleRate = sampleRate
+    this.channels = channels
+    this.isStreaming = false
+    this.ffmpegProcess = null
+    this.inputStream = null
+    this.outputStream = null
+    this.chunkCount = 0
+    this.startTime = null
+    this.abortController = null
+  }
+
+  /**
+   * Start PCM streaming from MP3 input
+   * @param {ReadableStream} mp3Stream - The MP3 audio stream (Web ReadableStream)
+   * @param {AbortSignal} signal - Optional abort signal for cancellation
+   */
+  async startPCMStream(mp3Stream, signal = null) {
+    if (this.isStreaming) {
+      this.stopStream()
+    }
+
+    this.isStreaming = true
+    this.startTime = Date.now()
+    this.chunkCount = 0
+    this.abortController = new AbortController()
+    this.inputStream = new PassThrough()
+    this.outputStream = new PassThrough()
+
+    // Handle external abort signal
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        this.stopStream()
+      })
+    }
+
+    // Setup ffmpeg to convert MP3 to PCM
+    this.ffmpegProcess = ffmpeg()
+      .input(this.inputStream)
+      .inputFormat('mp3')
+      .audioFrequency(this.sampleRate)
+      .audioChannels(this.channels)
+      .audioCodec('pcm_f32le') // 32-bit float PCM (Web Audio API format)
+      .format('f32le')
+      .on('start', (commandLine) => {
+        console.log('FFmpeg started:', commandLine)
+      })
+      .on('error', (err) => {
+        console.error('FFmpeg error:', err)
+        this.cleanup()
+      })
+      .on('end', () => {
+        console.log('FFmpeg processing finished')
+        this.cleanup()
+      })
+
+    // Pipe ffmpeg output to our output stream
+    this.ffmpegProcess.pipe(this.outputStream, { end: false })
+
+    // Handle PCM output chunks
+    this.outputStream.on('data', (chunk) => {
+      if (this.isStreaming && this.socket.connected) {
+        try {
+          // Convert Buffer to Float32Array for Web Audio API
+          const float32Array = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.length / 4)
+          
+          this.chunkCount++
+          
+          // Emit PCM chunk to frontend
+          this.socket.emit('pcm-chunk', {
+            data: Array.from(float32Array), // Convert to regular array for JSON serialization
+            sampleRate: this.sampleRate,
+            channels: this.channels,
+            chunkIndex: this.chunkCount,
+            timestamp: Date.now() - this.startTime
+          })
+          
+          // Log first chunk for debugging
+          if (this.chunkCount === 1) {
+            console.log(`First PCM chunk sent: ${float32Array.length} samples, ${this.sampleRate}Hz`)
+          }
+        } catch (error) {
+          console.error('Error processing PCM chunk:', error)
+        }
+      }
+    })
+
+    this.outputStream.on('end', () => {
+      if (this.isStreaming) {
+        const duration = this.startTime ? Date.now() - this.startTime : 0
+        console.log(`PCM stream ended: ${this.chunkCount} chunks, ${duration}ms duration`)
+        this.socket.emit('pcm-end', {
+          chunkCount: this.chunkCount,
+          duration: duration
+        })
+      }
+      this.cleanup()
+    })
+
+    // Pipe MP3 stream (Web ReadableStream) to ffmpeg input
+    const reader = mp3Stream.getReader()
+    this.pumpMP3Data(reader)
+  }
+
+  /**
+   * Pump MP3 data from ReadableStream to ffmpeg input
+   */
+  async pumpMP3Data(reader) {
+    try {
+      while (this.isStreaming) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          this.inputStream.end()
+          break
+        }
+
+        if (this.isStreaming && this.inputStream.writable) {
+          this.inputStream.write(Buffer.from(value))
+        }
+      }
+    } catch (error) {
+      console.error('Error pumping MP3 data:', error)
+      this.cleanup()
+    } finally {
+      try {
+        reader.releaseLock()
+      } catch (e) {
+        // Reader might already be released
+      }
+    }
+  }
+
+  /**
+   * Stop the PCM stream immediately
+   */
+  stopStream() {
+    this.isStreaming = false
+    this.cleanup()
+  }
+
+  /**
+   * Clean up resources
+   */
+  cleanup() {
+    this.isStreaming = false
+
+    if (this.ffmpegProcess) {
+      try {
+        this.ffmpegProcess.kill('SIGKILL')
+      } catch (e) {
+        // Process might already be dead
+      }
+      this.ffmpegProcess = null
+    }
+
+    if (this.inputStream) {
+      try {
+        this.inputStream.destroy()
+      } catch (e) {}
+      this.inputStream = null
+    }
+
+    if (this.outputStream) {
+      try {
+        this.outputStream.destroy()
+      } catch (e) {}
+      this.outputStream = null
+    }
+  }
+}
+
+/**
+ * Create a Web ReadableStream from a Buffer
+ */
+function bufferToWebReadableStream(buffer, chunkSize = 32 * 1024) {
+  let offset = 0
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= buffer.length) {
+        controller.close()
+        return
+      }
+      const end = Math.min(offset + chunkSize, buffer.length)
+      controller.enqueue(buffer.subarray(offset, end))
+      offset = end
+    }
+  })
+}
+
+/**
+ * Stream TTS as PCM chunks using Piper TTS (offline)
+ * @param {Socket} socket - Socket.IO socket
+ * @param {string} text - Text to convert to speech
+ * @param {AbortSignal} signal - Abort signal for cancellation
+ * @param {string} voice - Voice model to use (default: 'en_US-amy-medium')
+ */
+export async function streamTTSAsPCM(socket, text, signal = null, voice = 'en_US-amy-medium') {
+  console.log('🎤 Starting TTS PCM stream for text (Piper TTS):', text.substring(0, 50) + '...')
+  console.log('🎵 Using voice:', voice)
+
+  try {
+    // Initialize Piper
+    console.log('📡 Initializing Piper TTS...')
+    const piper = new PiperTTS()
+    
+    // Generate speech
+    console.log('🎵 Generating speech...')
+    const audioBuffer = await piper.synthesize(text, {
+      model: voice,
+      outputFormat: 'wav'
+    })
+
+    console.log('🔄 Speech generation completed, audio size:', audioBuffer.length)
+
+    // Convert buffer to Web ReadableStream
+    const audioStream = bufferToWebReadableStream(audioBuffer)
+
+    // Create PCM streamer and start conversion
+    console.log('🔄 Creating PCM streamer...')
+    const pcmStreamer = new PCMStreamer(socket, 24000, 1)
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        console.log('🛑 Abort signal received, stopping PCM stream')
+        pcmStreamer.stopStream()
+      })
+    }
+
+    // Start PCM streaming
+    console.log('🎵 Starting PCM stream conversion...')
+    await pcmStreamer.startPCMStream(audioStream, signal)
+    console.log('✅ PCM stream completed (Piper TTS)')
+
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      console.log('🛑 TTS PCM request aborted')
+      return
+    }
+
+    console.error('❌ TTS PCM stream error (Piper TTS):', error)
+    socket.emit('error', 'TTS PCM stream failed: ' + error.message)
+  }
+}
