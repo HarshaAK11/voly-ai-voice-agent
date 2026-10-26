@@ -15,6 +15,9 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "overrides": {
+    "body-parser": "2.4.0"
+  },
   "devDependencies": {
     "concurrently": "^9.2.4"
   },
