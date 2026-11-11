@@ -1,130 +1,89 @@
-  import express from 'express'
-  import dotenv from 'dotenv'
-  import { Server } from 'socket.io'
-  import { createServer } from 'http'
-  import cors from 'cors'
-  import { speechToText } from './services/STT.service.js'
-  import { streamTTSAsPCM } from './services/PCMStreamer.service.js'
-  import { GoogleGenerativeAI } from '@google/generative-ai'
-  import axios from 'axios'
-  import {
-    MemoryRateLimiter,
-    consumeSocketRateLimit,
-    createHttpRateLimit,
-    getClientIp,
-    getRateLimitConfig
-  } from './services/rateLimit.service.js'
+import express from 'express'
+import dotenv from 'dotenv'
+import { Server } from 'socket.io'
+import { createServer } from 'http'
+import cors from 'cors'
+import { speechToText } from './services/STT.service.js'
+import { streamTTSAsPCM } from './services/PCMStreamer.service.js'
+import { GoogleGenerativeAI } from '@google/generative-ai'
+import Groq from 'groq-sdk'
+import { getAvailableSlots, bookSlot, formatSlotsForAI } from './services/calendar.service.js'
+import * as chrono from 'chrono-node'
+import {
+  MemoryRateLimiter,
+  consumeSocketRateLimit,
+  createHttpRateLimit,
+  getClientIp,
+  getRateLimitConfig
+} from './services/rateLimit.service.js'
 
-  dotenv.config()
+dotenv.config()
 
-  process.env.TZ = process.env.TZ || 'Asia/Kolkata'
+process.env.TZ = process.env.TZ || 'Asia/Kolkata'
 
-  const PORT = process.env.PORT || 5000
-  const app = express()
-  const rateLimitConfig = getRateLimitConfig()
+const PORT = process.env.PORT || 5000
+const app = express()
+const rateLimitConfig = getRateLimitConfig()
 
-  if (rateLimitConfig.trustProxyHops > 0) {
-    app.set('trust proxy', rateLimitConfig.trustProxyHops)
-  }
+if (rateLimitConfig.trustProxyHops > 0) {
+  app.set('trust proxy', rateLimitConfig.trustProxyHops)
+}
 
-  const createLimiter = settings => new MemoryRateLimiter({
-    ...settings,
-    maxKeys: rateLimitConfig.maxKeys
-  })
+const createLimiter = settings => new MemoryRateLimiter({
+  ...settings,
+  maxKeys: rateLimitConfig.maxKeys
+})
 
-  const httpLimiter = createLimiter(rateLimitConfig.http)
-  const tokenLimiter = createLimiter(rateLimitConfig.token)
-  const automationLimiter = createLimiter(rateLimitConfig.automation)
-  const socketConnectionLimiter = createLimiter(rateLimitConfig.socketConnections)
-  const aiLimiter = createLimiter(rateLimitConfig.ai)
-  const ttsLimiter = createLimiter(rateLimitConfig.tts)
+const httpLimiter = createLimiter(rateLimitConfig.http)
+const tokenLimiter = createLimiter(rateLimitConfig.token)
+const automationLimiter = createLimiter(rateLimitConfig.automation)
+const socketConnectionLimiter = createLimiter(rateLimitConfig.socketConnections)
+const aiLimiter = createLimiter(rateLimitConfig.ai)
+const ttsLimiter = createLimiter(rateLimitConfig.tts)
 
-  /* -------------------- Middleware -------------------- */
-  const allowedOrigins = process.env.FRONTEND_URL
-    ? [process.env.FRONTEND_URL]
-    : ['http://localhost:5173']
+/* -------------------- Middleware -------------------- */
+const allowedOrigins = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL]
+  : ['http://localhost:5173']
 
-  app.use(cors({
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST'],
+  credentials: true
+}))
+
+app.use(createHttpRateLimit({
+  limiter: httpLimiter,
+  trustedProxyHops: rateLimitConfig.trustProxyHops
+}))
+
+/* -------------------- HTTP + WebSocket Setup -------------------- */
+const httpServer = createServer(app)
+const io = new Server(httpServer, {
+  cors: {
     origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true
-  }))
-
-  app.use(createHttpRateLimit({
-    limiter: httpLimiter,
-    trustedProxyHops: rateLimitConfig.trustProxyHops
-  }))
-
-  /* -------------------- HTTP + WebSocket Setup -------------------- */
-  const httpServer = createServer(app)
-  const io = new Server(httpServer, {
-    cors: {
-      origin: allowedOrigins,
-      methods: ['GET', 'POST'],
-      credentials: true
-    }
-  })
-
-  io.use((socket, next) => {
-    const ip = getClientIp(socket.request, rateLimitConfig.trustProxyHops)
-    const result = socketConnectionLimiter.consume(`socket-connection:${ip}`)
-    if (result.allowed) return next()
-
-    const error = new Error('Too many connection attempts')
-    error.data = { retryAfterMs: Math.max(1000, result.resetAt - Date.now()) }
-    next(error)
-  })
-
-  /* -------------------- N8N Webhook URL -------------------- */
-  const BOOKING_WEBHOOK = 'https://d0e952e04489.ngrok-free.app/webhook/appointment'
-
-  /* -------------------- Booking Helper Function -------------------- */
-  const callBookingWebhook = async (message, name = null, phone = null) => {
-    console.log(`📞 Calling booking webhook with message: "${message}"`)
-    
-    try {
-      const payload = { message }
-      
-      // Add contact info only if provided (for booking requests)
-      if (name && phone) {
-        payload.name = name
-        payload.phone = phone
-        console.log(`📞 Including contact info: ${name}, ${phone}`)
-      }
-      
-      const response = await axios.post(
-        BOOKING_WEBHOOK,
-        payload,
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 15000 // Increased timeout for AI processing
-        }
-      )
-      
-      console.log(`📞 Webhook response:`, response.data)
-      return response.data
-      
-    } catch (error) {
-      console.error('📞 Booking webhook error:', error.message)
-      
-      // Fallback response
-      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        return { 
-          error: 'timeout',
-          message: 'System is taking longer than expected. Let me take your contact info and Harsha will call you back.'
-        }
-      }
-      
-      return { 
-        error: 'system_error',
-        message: 'Having trouble checking the calendar right now. Please try again or I can take your details for a callback.'
-      }
-    }
   }
+})
 
-  /* -------------------- Gemini LLM Setup -------------------- */
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-  const systemPrompt = `
+io.use((socket, next) => {
+  const ip = getClientIp(socket.request, rateLimitConfig.trustProxyHops)
+  const result = socketConnectionLimiter.consume(`socket-connection:${ip}`)
+  if (result.allowed) return next()
+
+  const error = new Error('Too many connection attempts')
+  error.data = { retryAfterMs: Math.max(1000, result.resetAt - Date.now()) }
+  next(error)
+})
+
+/* -------------------- Google Calendar (direct) -------------------- */
+// Calendar operations are handled via services/calendar.service.js
+// Slots are fetched on-demand (only when caller asks about availability)
+
+/* -------------------- Gemini LLM Setup (Primary) -------------------- */
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+const systemPrompt = `
    ### **Core Identity**
 
 You are **Voly**, an intelligent AI receptionist built by **Harsha Adithya Kumar**, co-founder of **RJ Global Group**.
@@ -172,9 +131,7 @@ If the caller requests Harsha, treat it as a **booking request with Harsha**, no
 4. **Never assume** service or details; confirm clearly.
 5. If the caller is unsure, offer friendly options (“We have slots in the morning or evening — which works better?”).
 6. Stay focused on solving the caller’s need; avoid small talk unless asked.
-7. After receiving a  [BOOKING SYSTEM RESPONSE] , acknowledge naturally and close the call:
-
-   > “Perfect, your slot’s confirmed. See you then!”
+7. **CRITICAL BOOKING RULE**: NEVER say an appointment or slot is booked or confirmed UNLESS you see BOOKING SYSTEM RESPONSE with success: true in the prompt. If you have not executed the booking action yet, or if details (name, phone, slot) are still needed, ask for them or tell the caller you are booking it now. Never fabricate or assume a confirmed booking!
 
 ---
 
@@ -295,509 +252,673 @@ When performing a structured action, output **only JSON** in this format:
 
   `
 
-  const model = genAI.getGenerativeModel({ 
-    model: 'gemini-2.5-flash',
-    systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-  })
+const model = genAI.getGenerativeModel({
+  model: 'gemini-2.5-flash',
+  systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+})
 
-  /* -------------------- In-Memory State -------------------- */
-  const llmControllers = new Map()
-  const ttsBusy = new Map()
-  const ttsBuffer = new Map()
-  const chatMemory = new Map()
-  const ttsControllers = new Map()
-  const interruptedResponses = new Map()
+/* -------------------- Groq LLM Setup (Fallback) -------------------- */
+const groq = new Groq({ apiKey: process.env.GROQ_API })
+const GROQ_MODEL = 'openai/gpt-oss-120b'
 
-  // Global cache for 7-day slots (same for all users)
-  let weeklySlots = null
-  let slotsLastUpdated = null
-  let slotsLoadPromise = null  
+/* -------------------- LLM Circuit Breaker -------------------- */
+// When Gemini hits a 429 quota error, we trip the circuit breaker and route
+// all subsequent turns directly to Groq for COOLDOWN_MS to avoid latency penalties.
+const GEMINI_COOLDOWN_MS = 15 * 60 * 1000 // 15 minutes
+let geminiCooloffUntil = 0
 
-  /* -------------------- Slot Management -------------------- */
-  const loadWeeklySlots = async () => {
-    console.log(`📅 Loading weekly slots...`)
-    
-    try {
-      const response = await callBookingWebhook("Get available slots for the next 7 days")
-      
-      if (response && !response.error) {
-        weeklySlots = response
-        slotsLastUpdated = Date.now()
-        console.log(`📅 Weekly slots loaded successfully`)
-        return response
-      } else {
-        console.log(`📅 Error loading slots:`, response?.message)
-        return { error: response?.error || 'unknown', message: response?.message || 'Could not load slots' }
-      }
-      
-    } catch (error) {
-      console.error('📅 Failed to load weekly slots:', error)
-      return { error: 'failed', message: 'Could not connect to calendar system' }
-    }
+const isGeminiAvailable = () => Date.now() > geminiCooloffUntil
+
+const tripGeminiBreaker = (reason = '') => {
+  geminiCooloffUntil = Date.now() + GEMINI_COOLDOWN_MS
+  const cooldownMins = Math.round(GEMINI_COOLDOWN_MS / 60000)
+  console.warn(`⚡ [Circuit Breaker] Gemini tripped (${reason}). Routing ALL requests directly to Groq for ${cooldownMins}m (until ${new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', timeStyle: 'medium' }).format(new Date(geminiCooloffUntil))} IST).`)
+}
+
+const resetGeminiBreaker = () => {
+  if (geminiCooloffUntil > 0) {
+    console.log('✅ [Circuit Breaker] Gemini recovered. Primary route restored.')
+    geminiCooloffUntil = 0
+  }
+}
+
+// Returns true if the error is a Gemini quota/rate-limit error
+const isGeminiQuotaError = (err) =>
+  err?.status === 429 ||
+  err?.message?.includes('429') ||
+  err?.message?.toLowerCase().includes('quota') ||
+  err?.message?.toLowerCase().includes('rate limit')
+
+/**
+ * Classify the caller's intent as JSON.
+ * If breaker is open, goes straight to Groq (0ms wasted).
+ * If breaker is closed, tries Gemini first; trips breaker if 429 occurs.
+ */
+const classifyAction = async (contextPrompt) => {
+  const userMsg = contextPrompt + '\n\nIMPORTANT: Respond ONLY with valid JSON (no natural text).'
+
+  // 1. If circuit breaker is open, bypass Gemini directly
+  if (!isGeminiAvailable()) {
+    console.log('⚡ [Groq Direct] Fast routing action classification to Groq (Gemini circuit breaker open)')
+    const res = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMsg }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+    })
+    return JSON.parse(res.choices[0].message.content)
   }
 
-  const getSlots = () => {
-    return weeklySlots || { error: 'not_loaded', message: 'Slots not yet loaded' }
-  }
-
-  /* -------------------- Chat Memory Helpers -------------------- */
-  const addToMemory = (socketId, role, text) => {
-    if (!chatMemory.has(socketId)) {
-      chatMemory.set(socketId, [])
-    }
-    
-    const history = chatMemory.get(socketId)
-    history.push({ role, text, timestamp: Date.now() })
-    
-    // Keep last 20 messages
-    if (history.length > 20) {
-      history.shift()
-    }
-  };
-
-  const buildContextPrompt = (socketId, newPrompt) => {
-    const history = chatMemory.get(socketId)
-    
-    let context = ""
-
-    // Add current date/time context
-    const now = new Date()
-    const istTime = new Intl.DateTimeFormat('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      dateStyle: 'full',
-      timeStyle: 'short'
-    }).format(now)
-    
-    context += `[CURRENT TIME: ${istTime} (IST/UTC+5:30)]\n`
-
-    // Add available slots context
-    if (weeklySlots && !weeklySlots.error) {
-      context += `[AVAILABLE SLOTS: ${JSON.stringify(weeklySlots)}]\n`
-    } else if (weeklySlots && weeklySlots.error) {
-      context += `[SLOTS STATUS: Error loading calendar - ${weeklySlots.message}]\n`
-    } else {
-      context += `[SLOTS STATUS: Calendar not yet loaded]\n`
-    }
-
-    // Add interrupted response context if exists
-    const interrupted = interruptedResponses.get(socketId)
-    if (interrupted) {
-      context += `[CONTEXT: I was saying "${interrupted}" but was interrupted by user]\n`
-      interruptedResponses.delete(socketId)
-    }
-    
-    // Add conversation history
-    if (history && history.length > 0) {
-      context += "\n--- Recent Conversation ---\n"
-      const recentHistory = history.slice(-10) // Last 10 exchanges
-      recentHistory.forEach(msg => {
-        context += `${msg.role}: ${msg.text}\n`
+  // 2. Otherwise try Gemini (Primary)
+  try {
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: userMsg }] }]
+    })
+    resetGeminiBreaker()
+    let raw = result.response.text()
+    raw = raw.replace(/```json/gi, '').replace(/```/g, '').trim()
+    return JSON.parse(raw)
+  } catch (err) {
+    if (isGeminiQuotaError(err)) {
+      tripGeminiBreaker('429 Quota Exceeded')
+      const res = await groq.chat.completions.create({
+        model: GROQ_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMsg }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
       })
-      context += "--- End Recent Conversation ---\n"
+      return JSON.parse(res.choices[0].message.content)
     }
-    
-    // Add current user prompt
-    context += `\nuser: ${newPrompt}`
-    
-    return context
+    throw err
+  }
+}
+
+/**
+ * Stream the natural-language response.
+ * If breaker is open, goes straight to Groq (0ms wasted).
+ * If breaker is closed, tries Gemini streaming; trips breaker if 429 occurs.
+ */
+const streamResponse = async (contextPrompt, signal, onToken, onDone) => {
+  // 1. If circuit breaker is open, bypass Gemini directly
+  if (!isGeminiAvailable()) {
+    console.log('⚡ [Groq Direct] Fast routing response stream to Groq (Gemini circuit breaker open)')
+    const stream = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: contextPrompt }
+      ],
+      stream: true,
+      temperature: 0.7,
+    }, { signal })
+
+    for await (const chunk of stream) {
+      if (signal.aborted) break
+      const token = chunk.choices[0]?.delta?.content || ''
+      if (token) onToken(token)
+    }
+    onDone()
+    return
   }
 
-  /* -------------------- Booking Intent Detection -------------------- */
-  const needsBookingCheck = (prompt) => {
-    const text = prompt.toLowerCase()
-    
-    // Let AI decide - look for any scheduling/appointment related words
-    const bookingKeywords = [
-      'appointment', 'schedule', 'book', 'available', 'free', 'time', 'slot',
-      'meeting', 'call', 'consultation', 'when', 'today', 'tomorrow',
-      'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-      'morning', 'afternoon', 'evening', 'am', 'pm', 'calendar'
-    ]
-    
-    return bookingKeywords.some(keyword => text.includes(keyword))
+  // 2. Otherwise try Gemini first
+  try {
+    const result = await model.generateContentStream(
+      { contents: [{ role: 'user', parts: [{ text: contextPrompt }] }] }
+    )
+    resetGeminiBreaker()
+    for await (const chunk of result.stream) {
+      if (signal.aborted) break
+      const token = chunk.text() || ''
+      if (token) onToken(token)
+    }
+    onDone()
+    return
+  } catch (err) {
+    if (!isGeminiQuotaError(err)) throw err
+    tripGeminiBreaker('429 Streaming Quota Exceeded')
   }
 
-  const extractContactInfo = (conversationHistory) => {
-    let name = null
-    let phone = null
-    
-    const recentMessages = conversationHistory.slice(-10)
-    
-    for (const msg of recentMessages) {
-      if (msg.role === 'user') {
-        const text = msg.text.trim()
-        
-        // Look for phone patterns (more comprehensive)
-        if (!phone) {
-          const phoneMatch = text.match(/(\+?\d{10,15}|\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{10})/);
-          if (phoneMatch) {
-            phone = phoneMatch[1]
-            console.log(`📱 Extracted phone: ${phone}`)
-          }
+  // Fallback on the turn that tripped the breaker
+  const stream = await groq.chat.completions.create({
+    model: GROQ_MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: contextPrompt }
+    ],
+    stream: true,
+    temperature: 0.7,
+  }, { signal })
+
+  for await (const chunk of stream) {
+    if (signal.aborted) break
+    const token = chunk.choices[0]?.delta?.content || ''
+    if (token) onToken(token)
+  }
+  onDone()
+}
+
+/* -------------------- In-Memory State -------------------- */
+const llmControllers = new Map()
+const ttsBusy = new Map()
+const ttsBuffer = new Map()
+const chatMemory = new Map()
+const ttsControllers = new Map()
+const interruptedResponses = new Map()
+
+/* -------------------- Chat Memory Helpers -------------------- */
+const addToMemory = (socketId, role, text) => {
+  if (!chatMemory.has(socketId)) {
+    chatMemory.set(socketId, [])
+  }
+
+  const history = chatMemory.get(socketId)
+  history.push({ role, text, timestamp: Date.now() })
+
+  // Keep last 20 messages
+  if (history.length > 20) {
+    history.shift()
+  }
+};
+
+const buildContextPrompt = (socketId, newPrompt) => {
+  const history = chatMemory.get(socketId)
+
+  let context = ""
+
+  // Add current date/time context
+  const now = new Date()
+  const istTime = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    dateStyle: 'full',
+    timeStyle: 'short'
+  }).format(now)
+
+  context += `[CURRENT TIME: ${istTime} (IST/UTC+5:30)]\n`
+
+  // Slots are injected per-request when needed (see ai-processing handler)
+
+  // Add interrupted response context if exists
+  const interrupted = interruptedResponses.get(socketId)
+  if (interrupted) {
+    context += `[CONTEXT: I was saying "${interrupted}" but was interrupted by user]\n`
+    interruptedResponses.delete(socketId)
+  }
+
+  // Add conversation history
+  if (history && history.length > 0) {
+    context += "\n--- Recent Conversation ---\n"
+    const recentHistory = history.slice(-10) // Last 10 exchanges
+    recentHistory.forEach(msg => {
+      context += `${msg.role}: ${msg.text}\n`
+    })
+    context += "--- End Recent Conversation ---\n"
+
+    // Add extracted customer details if detected in previous turns
+    const contact = extractContactInfo(history)
+    if (contact.name || contact.phone) {
+      context += `[KNOWN CUSTOMER DETAILS: name=${contact.name || 'unknown'}, phone=${contact.phone || 'unknown'}]\n`
+    }
+  }
+
+  // Add current user prompt
+  context += `\nuser: ${newPrompt}`
+
+  return context
+}
+
+/* -------------------- Slot Resolution (natural language → ISO) -------------------- */
+/**
+ * Takes a natural-language slot string like "tomorrow 1 PM" or "Monday 10 AM"
+ * and matches it to the nearest available slot ISO timestamp.
+ * Returns the matching startISO string, or null if no match found.
+ */
+const resolveSlotToISO = (slotText, slotsResult) => {
+  if (!slotsResult.success || !slotsResult.slots) return null
+
+  // Parse the natural language date using chrono-node (IST reference)
+  const referenceDate = new Date()
+  const parsed = chrono.parse(slotText, referenceDate, { forwardDate: true })
+  if (!parsed || parsed.length === 0) {
+    console.log(`📅 chrono could not parse: "${slotText}"`)
+    return null
+  }
+
+  const targetDate = parsed[0].start.date()
+  console.log(`📅 Parsed "${slotText}" → ${targetDate.toISOString()}`)
+
+  // Find the closest available slot within ±30 minutes of parsed time
+  let bestMatch = null
+  let bestDiff = Infinity
+
+  for (const slots of Object.values(slotsResult.slots)) {
+    for (const slot of slots) {
+      const slotTime = new Date(slot.startISO)
+      const diff = Math.abs(slotTime - targetDate)
+      if (diff < bestDiff && diff <= 30 * 60 * 1000) { // within 30 min
+        bestDiff = diff
+        bestMatch = slot.startISO
+      }
+    }
+  }
+
+  if (!bestMatch) {
+    console.log(`📅 No available slot within 30 min of "${slotText}"`)
+  }
+  return bestMatch
+}
+
+/* -------------------- Booking Intent Detection -------------------- */
+const needsBookingCheck = (prompt) => {
+  const text = prompt.toLowerCase()
+
+  // Let AI decide - look for any scheduling/appointment related words
+  const bookingKeywords = [
+    'appointment', 'schedule', 'book', 'available', 'free', 'time', 'slot',
+    'meeting', 'call', 'consultation', 'when', 'today', 'tomorrow',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'morning', 'afternoon', 'evening', 'am', 'pm', 'calendar', 'confirm', 'yes', 'perfect', 'sounds good'
+  ]
+
+  return bookingKeywords.some(keyword => text.includes(keyword))
+}
+
+const extractContactInfo = (conversationHistory) => {
+  let name = null
+  let phone = null
+  let slot = null
+
+  const recentMessages = conversationHistory.slice(-10)
+
+  for (const msg of recentMessages) {
+    if (msg.role === 'user') {
+      const text = msg.text.trim()
+
+      // Look for phone patterns (more comprehensive)
+      if (!phone) {
+        const phoneMatch = text.match(/(\+?\d{10,15}|\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{10})/);
+        if (phoneMatch) {
+          phone = phoneMatch[1]
+          console.log(`📱 Extracted phone: ${phone}`)
         }
-        
-        // Look for name patterns
-        if (!name) {
+      }
+
+      // Look for name patterns (e.g. "my name is Harsha", "this is John", or standalone names)
+      if (!name) {
+        const nameIntro = text.match(/(?:my name is|i am|this is)\s+([A-Za-z\s]{2,30})/i)
+        if (nameIntro) {
+          name = nameIntro[1].trim()
+          console.log(`👤 Extracted name from intro: ${name}`)
+        } else {
           const words = text.split(/\s+/)
-          
-          // Check if this looks like a name response
-          if (words.length <= 3 && 
-              words.every(word => /^[A-Za-z]+$/.test(word)) &&
-              text.length >= 2 && 
-              text.length <= 50 &&
-              !text.toLowerCase().includes('book') &&
-              !text.toLowerCase().includes('schedule') &&
-              !text.toLowerCase().includes('appointment')) {
-            
+          if (words.length <= 3 &&
+            words.every(word => /^[A-Za-z]+$/.test(word)) &&
+            text.length >= 2 &&
+            text.length <= 50 &&
+            !/^(yes|no|ok|okay|sure|hello|hi|hey|book|schedule|appointment|tomorrow|today|morning|evening|afternoon)$/i.test(text.trim())) {
             name = text
             console.log(`👤 Extracted name: ${name}`)
           }
         }
       }
-    }
-    
-    console.log(`📋 Contact extraction result - Name: ${name}, Phone: ${phone}`)
-    return { name, phone }
-  }
 
-  /* -------------------- TTS Helpers -------------------- */
-  async function streamTTS(socket, text) {
-    const controller = new AbortController()
-    ttsControllers.set(socket.id, controller)
-
-    try {
-      await streamTTSAsPCM(socket, text, controller.signal)
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        console.log('TTS PCM request aborted')
-      } else {
-        console.error('TTS PCM stream error:', error)
-      }
-    } finally {
-      const currentController = ttsControllers.get(socket.id)
-      if (currentController === controller) {
-        ttsControllers.delete(socket.id)
-      }
-    }
-  }
-
-  async function maybeFlushSentence(socket) {
-    const sid = socket.id
-    if (ttsBusy.get(sid)) return
-    const buf = (ttsBuffer.get(sid) || '').trim()
-    if (!buf) return
-
-    const match = buf.match(/(.+?[\.!\?]+)(\s|$)/)
-    if (!match) return
-
-    const sentence = match[1].trim()
-    const remainder = buf.slice(match[0].length)
-    ttsBuffer.set(sid, remainder)
-
-    try {
-      ttsBusy.set(sid, true)
-      await streamTTS(socket, sentence)
-    } catch (e) {
-      console.error('TTS stream error:', e)
-    } finally {
-      ttsBusy.set(sid, false)
-      await maybeFlushSentence(socket)
-    }
-  }
-
-  function interruptAllAI(socketId) {
-    const llmController = llmControllers.get(socketId)
-    if (llmController) {
-      llmController.abort()
-      llmControllers.delete(socketId)
-      console.log(`LLM generation interrupted for socket ${socketId}`)
-    }
-    
-    const ttsController = ttsControllers.get(socketId)
-    if (ttsController) {
-      ttsController.abort()
-      ttsControllers.delete(socketId)
-      console.log(`TTS stream interrupted for socket ${socketId}`)
-    }
-    
-    ttsBuffer.set(socketId, '')
-    ttsBusy.set(socketId, false)
-
-    // 🚨 NEW: Tell client to stop playback immediately
-    const socket = io.sockets.sockets.get(socketId)
-    if (socket) {
-      socket.emit('clear-audio')
-    }
-  }
-
-  /* -------------------- WebSocket Events -------------------- */
-  io.on('connection', async (socket) => {
-    console.log('🔌 WS Connected!', socket.id)
-    
-    // Load slots only once per socket connection
-    if (!weeklySlots) {
-      console.log('📅 Loading weekly slots for first time...')
-      socket.emit('status', 'Loading calendar...')
-
-      if (!slotsLoadPromise) {
-        slotsLoadPromise = loadWeeklySlots().finally(() => {
-          slotsLoadPromise = null
-        })
-      }
-      await slotsLoadPromise
-
-      socket.emit('status', 'Ready')
-    } else {
-      socket.emit('status', 'Ready')
-    }
-
-    socket.on('ai-processing', async (prompt) => {
-      if (!consumeSocketRateLimit(socket, aiLimiter, 'ai-processing', rateLimitConfig.trustProxyHops)) return
-      if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000) {
-        socket.emit('error', 'Prompt must be between 1 and 4000 characters')
-        return
-      }
-
-      console.log(`\n🎯 [${socket.id}] Processing AI request:`, prompt)
-
-      // Step 1: Interrupt existing processes
-      interruptAllAI(socket.id)
-      addToMemory(socket.id, 'user', prompt)
-
-      // Step 2: Only classify calls that could require a calendar action.
-      // Ordinary questions used to wait for an extra complete LLM request.
-      let aiAction = null
-      if (needsBookingCheck(prompt)) {
-      try {
-        const actionPrompt = buildContextPrompt(socket.id, prompt) + 
-          "\n\nIMPORTANT: Respond ONLY with valid JSON (no natural text)."
-      
-        const actionResult = await model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: actionPrompt }] }]
-        })
-        
-        // ✅ FIXED: Use .text() method instead of choices[0]
-        let raw = actionResult.response.text()
-        console.log(`🤖 Raw AI Action:`, raw)
-      
-        // Remove markdown fences if present
-        raw = raw.replace(/```json/i, '').replace(/```/g, '').trim()
-      
-        try {
-          aiAction = JSON.parse(raw)
-        } catch (e) {
-          console.error("❌ Failed to parse AI action after cleaning:", raw, e.message)
-          aiAction = { action: "none", parameters: {} }
+      // Look for slot/time mentions if not yet identified
+      if (!slot) {
+        const timeMatch = text.match(/(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*at\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i)
+          || text.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i)
+          || text.match(/(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i)
+        if (timeMatch) {
+          slot = timeMatch[0].trim()
+          console.log(`⏰ Extracted slot from user speech: ${slot}`)
         }
-        
+      }
+    }
+  }
+
+  console.log(`📋 Contact extraction result - Name: ${name}, Phone: ${phone}, Slot: ${slot}`)
+  return { name, phone, slot }
+}
+
+/* -------------------- TTS Helpers -------------------- */
+async function streamTTS(socket, text) {
+  const controller = new AbortController()
+  ttsControllers.set(socket.id, controller)
+
+  try {
+    await streamTTSAsPCM(socket, text, controller.signal)
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log('TTS PCM request aborted')
+    } else {
+      console.error('TTS PCM stream error:', error)
+    }
+  } finally {
+    const currentController = ttsControllers.get(socket.id)
+    if (currentController === controller) {
+      ttsControllers.delete(socket.id)
+    }
+  }
+}
+
+// Per-socket queue for TTS tasks so sentences play in strict sequence without race conditions
+const ttsQueue = new Map()
+
+async function enqueueTTS(socket, text) {
+  const sid = socket.id
+  const prevPromise = ttsQueue.get(sid) || Promise.resolve()
+
+  const nextPromise = prevPromise
+    .catch(() => {}) // never fail the chain
+    .then(async () => {
+      // Check if current request was aborted before processing
+      const llmCtrl = llmControllers.get(sid)
+      if (llmCtrl && llmCtrl.signal.aborted) return
+      await streamTTS(socket, text)
+    })
+
+  ttsQueue.set(sid, nextPromise)
+  return nextPromise
+}
+
+async function maybeFlushSentence(socket) {
+  const sid = socket.id
+  const buf = (ttsBuffer.get(sid) || '').trim()
+  if (!buf) return
+
+  const match = buf.match(/(.+?[\.!\?]+)(\s|$)/)
+  if (!match) return
+
+  const sentence = match[1].trim()
+  const remainder = buf.slice(match[0].length)
+  ttsBuffer.set(sid, remainder)
+
+  enqueueTTS(socket, sentence)
+  maybeFlushSentence(socket)
+}
+
+function interruptAllAI(socketId) {
+  const llmController = llmControllers.get(socketId)
+  if (llmController) {
+    llmController.abort()
+    llmControllers.delete(socketId)
+    console.log(`LLM generation interrupted for socket ${socketId}`)
+  }
+
+  const ttsController = ttsControllers.get(socketId)
+  if (ttsController) {
+    ttsController.abort()
+    ttsControllers.delete(socketId)
+    console.log(`TTS stream interrupted for socket ${socketId}`)
+  }
+
+  ttsBuffer.set(socketId, '')
+  ttsBusy.set(socketId, false)
+  ttsQueue.delete(socketId)
+
+  // 🚨 NEW: Tell client to stop playback immediately
+  const socket = io.sockets.sockets.get(socketId)
+  if (socket) {
+    socket.emit('clear-audio')
+  }
+}
+
+/* -------------------- WebSocket Events -------------------- */
+io.on('connection', async (socket) => {
+  console.log('🔌 WS Connected!', socket.id)
+  socket.emit('status', 'Ready')
+
+  socket.on('ai-processing', async (prompt) => {
+    if (!consumeSocketRateLimit(socket, aiLimiter, 'ai-processing', rateLimitConfig.trustProxyHops)) return
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000) {
+      socket.emit('error', 'Prompt must be between 1 and 4000 characters')
+      return
+    }
+
+    console.log(`\n🎯 [${socket.id}] Processing AI request:`, prompt)
+
+    // Step 1: Interrupt existing processes
+    interruptAllAI(socket.id)
+    addToMemory(socket.id, 'user', prompt)
+
+    // Step 2: Only classify calls that could require a calendar action.
+    // Ordinary questions used to wait for an extra complete LLM request.
+    let aiAction = null
+    if (needsBookingCheck(prompt)) {
+      try {
+        const actionPrompt = buildContextPrompt(socket.id, prompt)
+        aiAction = await classifyAction(actionPrompt)
+        console.log(`🤖 AI Action:`, aiAction)
       } catch (err) {
         console.error("AI action fetch failed:", err)
         aiAction = { action: "none", parameters: {} }
       }
-      } else {
-        aiAction = { action: "none", parameters: {} }
-      }
+    } else {
+      aiAction = { action: "none", parameters: {} }
+    }
 
-      // Step 3: Execute based on structured action
-      let bookingResponse = null
-      if (aiAction.action === "check_slots") {
-        bookingResponse = { type: "availability", slots: getSlots() }
+    // Auto-fill parameters from conversation history if LLM omitted them
+    if (aiAction.action === "book" && aiAction.parameters) {
+      const history = chatMemory.get(socket.id) || []
+      const extracted = extractContactInfo(history)
+      if (!aiAction.parameters.name && extracted.name) {
+        aiAction.parameters.name = extracted.name
+        console.log(`👤 Auto-filled name from history: ${extracted.name}`)
       }
-      else if (aiAction.action === "book") {
-        const { slot, name, phone } = aiAction.parameters
-        if (slot && name && phone) {
-          bookingResponse = await callBookingWebhook(slot, name, phone)
+      if (!aiAction.parameters.phone && extracted.phone) {
+        aiAction.parameters.phone = extracted.phone
+        console.log(`📱 Auto-filled phone from history: ${extracted.phone}`)
+      }
+      if (!aiAction.parameters.slot && extracted.slot) {
+        aiAction.parameters.slot = extracted.slot
+        console.log(`⏰ Auto-filled slot from history: ${extracted.slot}`)
+      }
+    }
+
+    // Step 3: Execute based on structured action
+    let bookingResponse = null
+    if (aiAction.action === "check_slots") {
+      console.log(`📅 [${socket.id}] Fetching live calendar slots...`)
+      const slotsResult = await getAvailableSlots(7)
+      const slotsSummary = formatSlotsForAI(slotsResult)
+      bookingResponse = { type: "availability", slots: slotsSummary }
+    }
+    else if (aiAction.action === "book") {
+      const { slot, name, phone, service } = aiAction.parameters
+      if (slot && name && phone) {
+        console.log(`📅 [${socket.id}] Resolving slot "${slot}" for ${name} (${phone})`)
+
+        // Step 3a: Fetch live slots to get valid ISO timestamps
+        const slotsResult = await getAvailableSlots(7)
+
+        // Step 3b: Parse the natural-language slot ("tomorrow 1 PM") → ISO
+        const resolvedISO = resolveSlotToISO(slot, slotsResult)
+
+        if (resolvedISO) {
+          console.log(`📅 [${socket.id}] Resolved "${slot}" → ${resolvedISO}`)
+          bookingResponse = await bookSlot(resolvedISO, name, phone, service || 'Appointment')
           bookingResponse.type = "booking"
         } else {
+          // Could not match the requested slot to an available slot
+          const slotsSummary = formatSlotsForAI(slotsResult)
           bookingResponse = {
-            status: "MISSING_INFO",
-            missing: {
-              slot: !slot,
-              name: !name,
-              phone: !phone
-            }
+            type: "slot_not_found",
+            requested: slot,
+            available: slotsSummary,
+            message: `The slot "${slot}" isn't available. Here are open slots: ${slotsSummary}`
           }
         }
+      } else {
+        bookingResponse = {
+          status: "MISSING_INFO",
+          missing: { slot: !slot, name: !name, phone: !phone }
+        }
       }
-      
-      // Step 4: Build conversation prompt (natural reply)
-      let contextPrompt = buildContextPrompt(socket.id, prompt)
+    }
 
-      if (bookingResponse) {
-        contextPrompt += `\n\n[BOOKING SYSTEM RESPONSE: ${JSON.stringify(bookingResponse)}]`
-      }
-      
-      contextPrompt += `\n\nIMPORTANT: Respond naturally to the user. Do NOT output JSON in this step.`
+    // Step 4: Build conversation prompt (natural reply)
+    let contextPrompt = buildContextPrompt(socket.id, prompt)
 
-      // Step 5: Generate AI response
-      const controller = new AbortController()
-      llmControllers.set(socket.id, controller)
-      let botResponse = ''
+    if (bookingResponse) {
+      contextPrompt += `\n\n[BOOKING SYSTEM RESPONSE: ${JSON.stringify(bookingResponse)}]`
+    }
 
-      try {
-        console.log(`🤖 [${socket.id}] Starting LLM generation...`)
-        
-        const result = await model.generateContentStream(
-          { contents: [{ role: 'user', parts: [{ text: contextPrompt }] }] }
-        )
-      
-        for await (const chunk of result.stream) {
-          // ✅ FIXED: Use .text() method instead of choices[0]
-          const token = chunk.text() || ''
-          
-          if (token) {
-            botResponse += token
-            socket.emit('llm-token', token)
-            const existing = ttsBuffer.get(socket.id) || ''
-            ttsBuffer.set(socket.id, existing + token)
-      
-            if (/[\.!\?]\s*$/.test(existing + token)) {
-              await maybeFlushSentence(socket)
-            }
+    contextPrompt += `\n\nIMPORTANT: Respond naturally to the user. Do NOT output JSON in this step.`
+
+    // Step 5: Generate AI response
+    const controller = new AbortController()
+    llmControllers.set(socket.id, controller)
+    let botResponse = ''
+
+    try {
+      console.log(`🤖 [${socket.id}] Starting LLM generation...`)
+
+      await streamResponse(
+        contextPrompt,
+        controller.signal,
+        // onToken
+        async (token) => {
+          botResponse += token
+          socket.emit('llm-token', token)
+          const existing = ttsBuffer.get(socket.id) || ''
+          ttsBuffer.set(socket.id, existing + token)
+          if (/[\.!?]\s*$/.test(existing + token)) {
+            await maybeFlushSentence(socket)
           }
-        }
-      
-        // Handle remaining TTS
-        const remaining = (ttsBuffer.get(socket.id) || '').trim()
-        if (remaining && !controller.signal.aborted) {
-          ttsBuffer.set(socket.id, remaining + '.')
-          await maybeFlushSentence(socket)
-          ttsBuffer.set(socket.id, '')
-        }
-      
-        if (botResponse.trim() && !controller.signal.aborted) {
-          addToMemory(socket.id, 'bot', botResponse.trim())
-        }
-      
-        socket.emit('llm-complete')
-        socket.emit('status', 'Ready')
-        console.log(`🎯 [${socket.id}] ✅ AI processing completed`)
-        
-      } catch (error) {
-        console.error(`🎯 [${socket.id}] AI processing error:`, error)
-        const isAbort = error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
-        
-        if (isAbort && botResponse.trim()) {
-          interruptedResponses.set(socket.id, botResponse.trim())
-        } else {
-          socket.emit('error', 'Failed to process AI request')
-        }
-        
-        socket.emit('status', 'Error')
-      } finally {
-        const current = llmControllers.get(socket.id)
-        if (current === controller) llmControllers.delete(socket.id)
-      }
-    })
+        },
+        // onDone (no-op — cleanup happens below)
+        () => { }
+      )
 
-    socket.on('interrupt-ai', () => {
-      console.log('🛑 AI interruption requested')
-      interruptAllAI(socket.id)
-      socket.emit('ai-interrupted')
-    })
-
-    socket.on('voly-intro', async (payload = {}) => {
-      if (!consumeSocketRateLimit(socket, ttsLimiter, 'voly-intro', rateLimitConfig.trustProxyHops)) return
-      const { text } = payload
-      if (typeof text !== 'string' || !text.trim() || text.length > 500) {
-        socket.emit('error', 'Intro text must be between 1 and 500 characters')
-        return
+      // Handle remaining TTS buffer after stream ends
+      const remaining = (ttsBuffer.get(socket.id) || '').trim()
+      if (remaining && !controller.signal.aborted) {
+        ttsBuffer.set(socket.id, '')
+        enqueueTTS(socket, remaining)
       }
 
-      try {
-        await streamTTS(socket, text)
-      } catch (err) {
-        console.error('Intro TTS error:', err)
+      // Wait for any queued TTS sentences to finish before declaring complete
+      const activeQueue = ttsQueue.get(socket.id)
+      if (activeQueue) {
+        await activeQueue
       }
-    })
 
-    socket.on('disconnect', () => {
-      console.log('🔌 Disconnected', socket.id)
-      interruptAllAI(socket.id)
-      
-      // Clear all socket-specific data
-      llmControllers.delete(socket.id)
-      ttsControllers.delete(socket.id)
-      ttsBusy.delete(socket.id)
-      ttsBuffer.delete(socket.id)
-      chatMemory.delete(socket.id)
-      interruptedResponses.delete(socket.id)
-    
-    })
+      if (botResponse.trim() && !controller.signal.aborted) {
+        addToMemory(socket.id, 'bot', botResponse.trim())
+      }
+
+      socket.emit('llm-complete')
+      socket.emit('status', 'Ready')
+      console.log(`🎯 [${socket.id}] ✅ AI processing completed`)
+
+    } catch (error) {
+      console.error(`🎯 [${socket.id}] AI processing error:`, error)
+      const isAbort = error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
+
+      if (isAbort && botResponse.trim()) {
+        interruptedResponses.set(socket.id, botResponse.trim())
+      } else {
+        socket.emit('error', 'Failed to process AI request')
+      }
+
+      socket.emit('status', 'Error')
+    } finally {
+      const current = llmControllers.get(socket.id)
+      if (current === controller) llmControllers.delete(socket.id)
+    }
   })
 
-  /* -------------------- Express API Routes -------------------- */
-  app.get('/token', createHttpRateLimit({
-    limiter: tokenLimiter,
-    trustedProxyHops: rateLimitConfig.trustProxyHops,
-    keyPrefix: 'token'
-  }), speechToText)
+  socket.on('interrupt-ai', () => {
+    console.log('🛑 AI interruption requested')
+    interruptAllAI(socket.id)
+    socket.emit('ai-interrupted')
+  })
 
-  // Debug routes
-  app.get('/debug/slots', (req, res) => {
+  socket.on('voly-intro', async (payload = {}) => {
+    if (!consumeSocketRateLimit(socket, ttsLimiter, 'voly-intro', rateLimitConfig.trustProxyHops)) return
+    const { text } = payload
+    if (typeof text !== 'string' || !text.trim() || text.length > 500) {
+      socket.emit('error', 'Intro text must be between 1 and 500 characters')
+      return
+    }
+
+    try {
+      await streamTTS(socket, text)
+    } catch (err) {
+      console.error('Intro TTS error:', err)
+    }
+  })
+
+  socket.on('disconnect', () => {
+    console.log('🔌 Disconnected', socket.id)
+    interruptAllAI(socket.id)
+
+    // Clear all socket-specific data
+    llmControllers.delete(socket.id)
+    ttsControllers.delete(socket.id)
+    ttsBusy.delete(socket.id)
+    ttsBuffer.delete(socket.id)
+    chatMemory.delete(socket.id)
+    interruptedResponses.delete(socket.id)
+
+  })
+})
+
+/* -------------------- Express API Routes -------------------- */
+app.get('/token', createHttpRateLimit({
+  limiter: tokenLimiter,
+  trustedProxyHops: rateLimitConfig.trustProxyHops,
+  keyPrefix: 'token'
+}), speechToText)
+
+const automationRateLimit = createHttpRateLimit({
+  limiter: automationLimiter,
+  trustedProxyHops: rateLimitConfig.trustProxyHops,
+  keyPrefix: 'automation'
+})
+
+// Debug: view live calendar slots
+app.get('/debug/slots', automationRateLimit, async (req, res) => {
+  const slotsResult = await getAvailableSlots(7)
+  res.json({
+    slots: slotsResult,
+    timestamp: new Date().toISOString()
+  })
+})
+
+// Test: Google Calendar connectivity
+app.get('/test-calendar', automationRateLimit, async (req, res) => {
+  try {
+    const slotsResult = await getAvailableSlots(7)
     res.json({
-      weeklySlots,
-      slotsLastUpdated: slotsLastUpdated ? new Date(slotsLastUpdated).toISOString() : null,
-      cacheAge: slotsLastUpdated ? Date.now() - slotsLastUpdated : null
+      success: slotsResult.success,
+      slots: slotsResult,
+      timestamp: new Date().toISOString()
     })
-  })
-
-  const automationRateLimit = createHttpRateLimit({
-    limiter: automationLimiter,
-    trustedProxyHops: rateLimitConfig.trustProxyHops,
-    keyPrefix: 'automation'
-  })
-
-  app.get('/test-webhook', automationRateLimit, async (req, res) => {
-    const message = req.query.message || "Get available slots for the next 7 days"
-    
-    try {
-      const result = await callBookingWebhook(message)
-      res.json({
-        input: message,
-        response: result,
-        timestamp: new Date().toISOString()
-      })
-    } catch (error) {
-      res.json({
-        error: error.message,
-        input: message
-      })
-    }
-  })
-
-  app.post('/refresh-slots', automationRateLimit, async (req, res) => {
-    console.log('🔄 Manual slot refresh requested')
-    
-    try {
-      const result = await loadWeeklySlots()
-      res.json({
-        success: !result.error,
-        data: result,
-        timestamp: new Date().toISOString()
-      })
-    } catch (error) {
-      res.json({
-        success: false,
-        error: error.message
-      })
-    }
-  })
-
-  async function listAvailableModels() {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-      const data = await response.json();
-      console.log('Available models:', data.models?.map(m => m.name));
-      return data.models;
-    } catch (error) {
-      console.error('Error listing models:', error);
-    }
+  } catch (error) {
+    res.json({ error: error.message })
   }
+})
 
-  /* -------------------- Start Server -------------------- */
-  httpServer.listen(PORT, () => {
+async function listAvailableModels() {
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+    const data = await response.json();
+    console.log('Available models:', data.models?.map(m => m.name));
+    return data.models;
+  } catch (error) {
+    console.error('Error listing models:', error);
+  }
+}
 
-    console.log(`🚀 Server running on port ${PORT}`)
-    console.log(`📅 Weekly slots will be loaded on first connection`)
-  })
+/* -------------------- Start Server -------------------- */
+httpServer.listen(PORT, () => {
+
+  console.log(`🚀 Server running on port ${PORT}`)
+  console.log(`📅 Google Calendar integration active — slots fetched on demand`)
+})

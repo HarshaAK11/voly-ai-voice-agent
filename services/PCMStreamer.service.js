@@ -262,10 +262,9 @@ export async function streamTTSAsPCM(socket, text, signal) {
       return
     }
 
-    // Forward binary PCM immediately. Do not await the pump: the next
-    // sentence can be requested while this one is already playing.
-    void streamPCMToSocket(socket, res.body, signal)
-    if (res.body) return
+    // Stream binary PCM from ElevenLabs to socket and wait for completion
+    // so consecutive sentences do not clobber each other.
+    await streamPCMToSocket(socket, res.body, signal)
 
     // Legacy MP3/FFmpeg path (unreachable; retained temporarily for rollback).
     console.log('🔄 Creating PCM streamer...')
