@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url)
 /* ---- Config ---- */
 const CREDENTIALS_PATH = path.resolve(__dirname, '../google-credentials.json')
 
-// Clinic working hours (IST, 24h format)
+// Working hours (IST, 24h format)
 const WORK_START_HOUR = 10   // 10:00 AM
 const WORK_END_HOUR   = 19   // 7:00 PM (last slot starts at 6 PM)
 const SLOT_DURATION   = 60   // minutes per slot

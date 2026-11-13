@@ -1,6 +1,6 @@
 # Voly
 
-Voly is a real-time AI voice receptionist that listens, responds naturally, handles interruptions, and helps callers with appointments and enquiries.
+Voly is a real-time conversational AI voice assistant that listens, responds naturally, handles interruptions, and helps users with questions, discussion, and Google Calendar scheduling.
 
 ## Try it live
 
@@ -114,6 +114,4 @@ The built-in store is process-local. If you deploy multiple server replicas, use
 shared rate-limit store (for example Redis) or enforce an additional limit at the
 hosting/CDN edge so every replica shares the same counters.
 
-## Author
 
-Built by [Harsha Adithya Kumar](https://harsha-peach.vercel.app/).

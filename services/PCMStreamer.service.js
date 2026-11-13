@@ -232,10 +232,11 @@ export async function streamTTSAsPCM(socket, text, signal) {
     model_id: 'eleven_flash_v2_5',
     text,
     voice_settings: {
-      stability: 0.4,
-      similarity_boost: 0.7,
-      style: 0.2,
-      use_speaker_boost: true
+      stability: 0.55,
+      similarity_boost: 0.8,
+      style: 0.0,
+      use_speaker_boost: true,
+      speed: 0.88 // Natural, relaxed conversational pacing (defaults to 1.0 which is too fast)
     }
   }
 

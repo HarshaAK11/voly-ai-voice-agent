@@ -16,6 +16,10 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   const [isBotSpeaking, setIsBotSpeaking] = useState(false)
   const [speechDetected, setSpeechDetected] = useState(false)
 
+  // Server Warmup & Cold-Start states
+  const [serverStatus, setServerStatus] = useState<'checking' | 'ready' | 'warming'>('checking')
+  const [warmupSeconds, setWarmupSeconds] = useState(45)
+
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const clientRef = useRef<any>(null)
@@ -23,6 +27,8 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   const llmSocketRef = useRef<Socket | null>(null) // App socket (Gemini + TTS)
 
   const lastFinalRef = useRef<string>('')
+  const pendingUtteranceRef = useRef<string>('')
+  const turnTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const llmSocketReadyRef = useRef(false)    // guard StrictMode double-connects
 
   // Interruption detection
@@ -44,6 +50,47 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       console.error('Failed to initialize PCM audio:', error)
     }
   }
+
+  // Proactive background ping on page mount to wake Render container
+  useEffect(() => {
+    let timer: NodeJS.Timeout
+    const pingServer = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(4000) })
+        if (res.ok) {
+          setServerStatus('ready')
+          return
+        }
+      } catch (e) {
+        // Server is sleeping or cold
+      }
+      setServerStatus('warming')
+    }
+
+    pingServer()
+
+    // If warming, poll every 3 seconds until online
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(4000) })
+        if (res.ok) {
+          setServerStatus('ready')
+          clearInterval(interval)
+        }
+      } catch (e) {}
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [])
+
+  // Warmup countdown timer when waking up
+  useEffect(() => {
+    if (serverStatus !== 'warming') return
+    const timer = setInterval(() => {
+      setWarmupSeconds((prev) => (prev > 1 ? prev - 1 : 1))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [serverStatus])
 
   /** ---------- Smart Interruption Detection ---------- */
   const setupInterruptionDetection = (stream: MediaStream) => {
@@ -163,25 +210,39 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
         if (text) setTranscript((prev) => (prev ? prev + ' ' + text : text))
 
         if (isFinal) {
-          const finalUtterance = (text || '').trim()
-          if (finalUtterance && finalUtterance !== lastFinalRef.current) {
-            lastFinalRef.current = finalUtterance
+          const finalChunk = (text || '').trim()
+          if (finalChunk && finalChunk !== lastFinalRef.current) {
+            lastFinalRef.current = finalChunk
 
-            setMessages((prev) => {
-              const next = [...prev]
-              next.push({ role: 'user', text: finalUtterance })
+            // Accumulate connected speech fragments across short mid-sentence pauses
+            pendingUtteranceRef.current = pendingUtteranceRef.current
+              ? `${pendingUtteranceRef.current} ${finalChunk}`
+              : finalChunk
+
+            // Clear any pending turn-dispatch timer from previous fragment
+            if (turnTimeoutRef.current) {
+              clearTimeout(turnTimeoutRef.current)
+            }
+
+            // Wait 800ms of silence before dispatching the completed user turn
+            turnTimeoutRef.current = setTimeout(() => {
+              const fullUtterance = pendingUtteranceRef.current.trim()
+              pendingUtteranceRef.current = ''
+              if (!fullUtterance) return
+
+              console.log('🗣️ Dispatched complete user turn:', fullUtterance)
+
+              setMessages((prev) => {
+                const next = [...prev]
+                next.push({ role: 'user', text: fullUtterance })
+                next.push({ role: 'bot', text: '', done: false })
+                return next
+              })
 
               if (llmSocketRef.current) {
-                // Deepgram already marks the utterance final; retain only a
-                // short guard so the response can begin promptly.
-                setTimeout(() => {
-                  llmSocketRef.current?.emit('ai-processing', finalUtterance)
-                }, 150)
+                llmSocketRef.current.emit('ai-processing', fullUtterance)
               }
-
-              next.push({ role: 'bot', text: '', done: false })
-              return next
-            })
+            }, 800)
           }
         }
       })
@@ -235,6 +296,12 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   }
 
   const start = async () => {
+    // If backend is cold, flag it and wait for it to wake before crashing
+    if (serverStatus !== 'ready') {
+      setServerStatus('warming')
+      return
+    }
+
     try {
       // Initialize PCM audio first
       await initializePCMAudio()
@@ -242,7 +309,7 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       // Play intro and wait for it to complete
       if (llmSocketRef.current) {
         llmSocketRef.current.emit("voly-intro", {
-          text: "Hey there! I'm Voly, your AI call agent. How can I help you today?",
+          text: "Hey! I'm Voly, your AI voice assistant. What's on your mind today?",
         })
         
         // Wait for intro to complete before starting microphone
@@ -272,6 +339,11 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   }
 
   const stop = () => {
+    if (turnTimeoutRef.current) {
+      clearTimeout(turnTimeoutRef.current)
+      turnTimeoutRef.current = null
+    }
+    pendingUtteranceRef.current = ''
     try {
       if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
     } catch (err) {
@@ -370,9 +442,18 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
         </header>
 
         <section className="voly-demo__hero">
-          <p className="voly-demo__eyebrow">YOUR AI RECEPTIONIST</p>
-          <h1>Every call deserves<br /><em>an answer.</em></h1>
-          <p className="voly-demo__intro">Meet Voly — a warm, natural voice agent that can answer questions, qualify callers, and help schedule appointments.</p>
+          <p className="voly-demo__eyebrow">INTELLIGENT VOICE ASSISTANT</p>
+          <h1>Have a real conversation.<br /><em>Just start talking.</em></h1>
+          <p className="voly-demo__intro">Meet Voly — a fast, conversational voice AI companion. Chat freely about ideas, explore AI concepts, or schedule time for a meeting.</p>
+
+          {serverStatus === 'warming' && (
+            <div className="voly-demo__warmup">
+              <span className="voly-demo__warmup-spinner" />
+              <span>
+                <strong>Waking up server...</strong> (Render free tier sleeps when idle). Ready in ~{warmupSeconds}s
+              </span>
+            </div>
+          )}
 
           <div className={`voly-demo__voice-card ${isRecording ? 'is-listening' : ''} ${isBotSpeaking ? 'is-speaking' : ''}`}>
             <div className="voly-demo__orb-wrap">
@@ -392,9 +473,9 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
         </section>
 
         <section className="voly-demo__details">
-          <div className="voly-demo__detail"><span>01</span><p><strong>Speak naturally</strong>Ask about availability, services, or an appointment.</p></div>
-          <div className="voly-demo__detail"><span>02</span><p><strong>Get a real response</strong>Voly listens, understands, and responds in real time.</p></div>
-          <div className="voly-demo__detail"><span>03</span><p><strong>Interrupt anytime</strong>Just start speaking again to guide the conversation.</p></div>
+          <div className="voly-demo__detail"><span>01</span><p><strong>Natural Speech</strong>Talk like you would with a friend — effortless and unscripted.</p></div>
+          <div className="voly-demo__detail"><span>02</span><p><strong>Smart Assistant</strong>Discuss technology, ask questions, or explore new ideas.</p></div>
+          <div className="voly-demo__detail"><span>03</span><p><strong>Calendar Integrated</strong>Ask to schedule a meeting and Voly will find open slots instantly.</p></div>
         </section>
 
         {messages.length > 0 && (
