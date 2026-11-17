@@ -11,6 +11,7 @@ type VoiceResponseProps = {
 
 const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   const [isRecording, setIsRecording] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [messages, setMessages] = useState<{ role: 'user' | 'bot'; text: string; done?: boolean }[]>([])
   const [isBotSpeaking, setIsBotSpeaking] = useState(false)
@@ -30,6 +31,9 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   const pendingUtteranceRef = useRef<string>('')
   const turnTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const llmSocketReadyRef = useRef(false)    // guard StrictMode double-connects
+  const isStartingRef = useRef(false)
+  const abortStartRef = useRef(false)
+  const cachedTokenRef = useRef<{ token: string; expiresAt: number } | null>(null)
 
   // Interruption detection
   const vadRef = useRef<any>(null)
@@ -185,76 +189,186 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
     }
   }
 
+  const isSocketAlive = (sock: any): boolean => {
+    if (!sock) return false
+    try {
+      const state = typeof sock.getReadyState === 'function' ? sock.getReadyState() : sock.readyState
+      return state === 1 // WebSocket.OPEN
+    } catch {
+      return false
+    }
+  }
+
   /** ---------- STT (Deepgram) ---------- */
   const getToken = async (): Promise<string> => {
+    if (cachedTokenRef.current && Date.now() < cachedTokenRef.current.expiresAt) {
+      return cachedTokenRef.current.token
+    }
     const res = await fetch(`${BACKEND_URL}/token`)
-    if (!res.ok) throw new Error('Failed to fetch token')
+    if (!res.ok) throw new Error(`Failed to fetch token: ${res.statusText}`)
     const json = await res.json()
-    return json.access_token
+    const token = json.access_token || json.key
+    // Cache for 8 minutes (or json.expires_in - 30 seconds)
+    const ttlMs = (json.expires_in ? Math.max(json.expires_in - 30, 60) : 480) * 1000
+    cachedTokenRef.current = { token, expiresAt: Date.now() + ttlMs }
+    return token
   }
 
   const ensureSocket = async () => {
-    if (socketRef.current) return socketRef.current
-    const token = await getToken()
-    const client = (clientRef.current ||= createClient({ accessToken: token }))
-    const socket = client.listen.live({ model: 'nova', smart_format: true })
-    socketRef.current = socket
+    // If currently held socket is still OPEN and ready to receive frames, reuse it
+    if (isSocketAlive(socketRef.current)) {
+      return socketRef.current
+    }
 
-    socket.on('open', () => {
-      socket.on('Results', (data: any) => {
-        const text = data?.channel?.alternatives?.[0]?.transcript || ''
-        const isFinal = Boolean(
-          (data?.is_final ?? data?.speech_final ?? data?.channel?.alternatives?.[0]?.confidence === 1)
-        )
+    // Clean up stale / closed socket
+    if (socketRef.current) {
+      try { socketRef.current.finish?.() } catch {}
+      try { socketRef.current.removeAllListeners?.() } catch {}
+      socketRef.current = null
+    }
 
-        if (text) setTranscript((prev) => (prev ? prev + ' ' + text : text))
+    let token: string
+    try {
+      token = await getToken()
+    } catch (err) {
+      cachedTokenRef.current = null
+      token = await getToken()
+    }
 
-        if (isFinal) {
-          const finalChunk = (text || '').trim()
-          if (finalChunk && finalChunk !== lastFinalRef.current) {
-            lastFinalRef.current = finalChunk
+    const client = createClient({ accessToken: token })
+    clientRef.current = client
+    const socket = client.listen.live({
+      model: 'nova',
+      smart_format: true,
+      interim_results: true,
+      endpointing: 250,        // Deepgram acoustic silence detector (250ms)
+      utterance_end_ms: 1000,  // Full conversational turn boundary
+      vad_events: true,
+    })
 
-            // Accumulate connected speech fragments across short mid-sentence pauses
-            pendingUtteranceRef.current = pendingUtteranceRef.current
-              ? `${pendingUtteranceRef.current} ${finalChunk}`
-              : finalChunk
+    const dispatchTurn = () => {
+      if (turnTimeoutRef.current) {
+        clearTimeout(turnTimeoutRef.current)
+        turnTimeoutRef.current = null
+      }
 
-            // Clear any pending turn-dispatch timer from previous fragment
-            if (turnTimeoutRef.current) {
-              clearTimeout(turnTimeoutRef.current)
-            }
+      const fullUtterance = pendingUtteranceRef.current.trim()
+      pendingUtteranceRef.current = ''
+      if (!fullUtterance) return
 
-            // Wait 800ms of silence before dispatching the completed user turn
-            turnTimeoutRef.current = setTimeout(() => {
-              const fullUtterance = pendingUtteranceRef.current.trim()
-              pendingUtteranceRef.current = ''
-              if (!fullUtterance) return
+      console.log('⚡ [Deepgram Endpointing] Dispatched turn:', fullUtterance)
 
-              console.log('🗣️ Dispatched complete user turn:', fullUtterance)
+      setMessages((prev) => {
+        const next = [...prev]
+        next.push({ role: 'user', text: fullUtterance })
+        next.push({ role: 'bot', text: '', done: false })
+        return next
+      })
 
-              setMessages((prev) => {
-                const next = [...prev]
-                next.push({ role: 'user', text: fullUtterance })
-                next.push({ role: 'bot', text: '', done: false })
-                return next
-              })
+      if (llmSocketRef.current) {
+        llmSocketRef.current.emit('ai-processing', fullUtterance)
+      }
+    }
 
-              if (llmSocketRef.current) {
-                llmSocketRef.current.emit('ai-processing', fullUtterance)
-              }
-            }, 800)
+    socket.on('Results', (data: any) => {
+      const text = data?.channel?.alternatives?.[0]?.transcript || ''
+      const isSpeechFinal = Boolean(data?.speech_final)
+      const isFinal = Boolean(
+        (data?.is_final ?? isSpeechFinal ?? data?.channel?.alternatives?.[0]?.confidence === 1)
+      )
+
+      if (text) setTranscript((prev) => (prev ? prev + ' ' + text : text))
+
+      if (isFinal) {
+        const finalChunk = (text || '').trim()
+        if (finalChunk && finalChunk !== lastFinalRef.current) {
+          lastFinalRef.current = finalChunk
+
+          // Accumulate connected speech fragments across short mid-sentence pauses
+          pendingUtteranceRef.current = pendingUtteranceRef.current
+            ? `${pendingUtteranceRef.current} ${finalChunk}`
+            : finalChunk
+
+          // Clear any pending turn-dispatch timer from previous fragment
+          if (turnTimeoutRef.current) {
+            clearTimeout(turnTimeoutRef.current)
           }
+
+          // If Deepgram acoustic model detected speech_final, dispatch rapidly (220ms)!
+          // If it's an interim final chunk without speech_final, allow 550ms so user can pause naturally.
+          const debounceMs = isSpeechFinal ? 220 : 550
+          turnTimeoutRef.current = setTimeout(dispatchTurn, debounceMs)
         }
+      }
+    })
+
+    // When Deepgram detects true acoustic end of utterance, flush immediately
+    socket.on('UtteranceEnd', () => {
+      if (pendingUtteranceRef.current.trim()) {
+        console.log('⚡ [Deepgram UtteranceEnd] Immediate acoustic flush')
+        dispatchTurn()
+      }
+    })
+
+    socket.on('error', (e: any) => {
+      console.error('Deepgram socket error:', e)
+      cachedTokenRef.current = null
+    })
+
+    socket.on('close', () => {
+      console.log('Deepgram socket closed')
+      if (socketRef.current === socket) {
+        socketRef.current = null
+      }
+    })
+
+    // Wait until WebSocket handshake is fully open before returning so openMic doesn't drop frames
+    await new Promise<void>((resolve, reject) => {
+      if (isSocketAlive(socket)) return resolve()
+
+      const timer = setTimeout(() => {
+        reject(new Error('Deepgram socket connection timed out'))
+      }, 7000)
+
+      socket.on('open', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+
+      socket.on('error', (err: any) => {
+        clearTimeout(timer)
+        cachedTokenRef.current = null
+        reject(err)
       })
     })
 
-    socket.on('error', (e: any) => console.error('Deepgram socket error:', e))
-    socket.on('close', () => (socketRef.current = null))
+    socketRef.current = socket
     return socket
   }
 
   const openMic = async (socket: any) => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      try { recorderRef.current.stop() } catch {}
+    }
+    if (streamRef.current) {
+      try { streamRef.current.getTracks().forEach((t) => t.stop()) } catch {}
+      streamRef.current = null
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      }
+    })
+
+    if (abortStartRef.current) {
+      stream.getTracks().forEach((t) => t.stop())
+      return
+    }
+
     streamRef.current = stream
     const rec = new MediaRecorder(stream)
     recorderRef.current = rec
@@ -285,14 +399,18 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
     }
 
     rec.ondataavailable = (e: any) => {
-      try {
-        socket.send(e.data)
-      } catch (err) {
-        console.error('Failed to send audio chunk to Deepgram:', err)
+      if (e.data && e.data.size > 0 && socket) {
+        try {
+          if (isSocketAlive(socket)) {
+            socket.send(e.data)
+          }
+        } catch (err) {
+          console.error('Failed to send audio chunk to Deepgram:', err)
+        }
       }
     }
 
-    rec.start(500)
+    rec.start(250)
   }
 
   const start = async () => {
@@ -302,53 +420,101 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       return
     }
 
+    if (isStartingRef.current || isRecording) return
+    isStartingRef.current = true
+    setIsConnecting(true)
+    abortStartRef.current = false
+
     try {
       // Initialize PCM audio first
       await initializePCMAudio()
-  
-      // Play intro and wait for it to complete
-      if (llmSocketRef.current) {
+      if (abortStartRef.current) return
+
+      // Play intro only on initial start of a clean conversation.
+      // Resuming an ongoing session skips the intro monologue so conversation picks up immediately.
+      if (messages.length === 0 && llmSocketRef.current) {
         llmSocketRef.current.emit("voly-intro", {
           text: "Hey! I'm Voly, your AI voice assistant. What's on your mind today?",
         })
-        
-        // Wait for intro to complete before starting microphone
-        // You can either:
-        // Option 1: Fixed delay (simple)
-        await new Promise(resolve => setTimeout(resolve, 3000)) // 3 seconds
-        
-        // Option 2: Wait for pcm-end event (better)
-        // await new Promise(resolve => {
-        //   const handler = () => {
-        //     llmSocketRef.current?.off('pcm-end', handler)
-        //     resolve()
-        //   }
-        //   llmSocketRef.current?.on('pcm-end', handler)
-        // })
+        await new Promise(resolve => setTimeout(resolve, 3000))
+        if (abortStartRef.current) return
       }
-  
-      // Now start microphone after intro is done
+
+      // Ensure fresh, open Deepgram socket
+      console.log('⚡ Establishing Deepgram speech recognition socket...')
       const socket = await ensureSocket()
-      if (socket && !isRecording && !recorderRef.current) {
-        console.log('🎤 Starting microphone after intro completed')
+      if (abortStartRef.current) {
+        try { socket?.finish?.() } catch {}
+        return
+      }
+
+      if (socket && !recorderRef.current) {
+        console.log('🎤 Starting microphone')
         await openMic(socket)
       }
     } catch (err) {
-      console.error('Failed to start:', err)
+      console.error('Failed to start conversation:', err)
+      stop()
+    } finally {
+      isStartingRef.current = false
+      setIsConnecting(false)
     }
   }
 
   const stop = () => {
+    console.log('🛑 Stopping conversation session')
+    abortStartRef.current = true
+    isStartingRef.current = false
+    setIsConnecting(false)
+
     if (turnTimeoutRef.current) {
       clearTimeout(turnTimeoutRef.current)
       turnTimeoutRef.current = null
     }
     pendingUtteranceRef.current = ''
+    lastFinalRef.current = ''
+
+    // 1. Immediately cut AI bot audio & notify backend
+    if (llmSocketRef.current) {
+      llmSocketRef.current.emit('interrupt-ai')
+    }
+    pcmAudio.stopPlayback()
+    setIsBotSpeaking(false)
+    setSpeechDetected(false)
+
+    // 2. Stop microphone
     try {
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop()
+      }
     } catch (err) {
       console.error('Failed to stop microphone:', err)
     }
+    recorderRef.current = null
+
+    if (streamRef.current) {
+      try { streamRef.current.getTracks().forEach((t) => t.stop()) } catch {}
+      streamRef.current = null
+    }
+
+    // 3. Clean up VAD
+    try { vadRef.current?.audioContext?.close() } catch {}
+    vadRef.current = null
+    if (speechDetectionRef.current) {
+      clearTimeout(speechDetectionRef.current)
+      speechDetectionRef.current = null
+    }
+    speechStartTimeRef.current = 0
+
+    // 4. Cleanly finish & reset Deepgram live socket
+    if (socketRef.current) {
+      try { socketRef.current.finish?.() } catch {}
+      try { socketRef.current.removeAllListeners?.() } catch {}
+      socketRef.current = null
+    }
+
+    setIsRecording(false)
+    document.body.classList.remove('recording')
   }
 
   /** ---------- LLM + TTS Socket.IO ---------- */
@@ -404,29 +570,22 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
     s.on('error', (err) => console.error('Socket error:', err))
 
     return () => {
-      try {
-        if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
-      } catch {}
-      try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
-      try { socketRef.current?.close?.() } catch {}
-      socketRef.current = null
+      stop()
       try { s.disconnect() } catch {}
       llmSocketRef.current = null
-
-      // Clean up detection
-      try { vadRef.current?.audioContext?.close() } catch {}
-      vadRef.current = null
-      if (speechDetectionRef.current) {
-        clearTimeout(speechDetectionRef.current)
-        speechDetectionRef.current = null
-      }
-
       // PCM audio cleanup is handled by the usePCMAudio hook
     }
   }, []) // <-- IMPORTANT: no dependency on isBotSpeaking
 
   if (mode === 'public') {
-    const agentState = isBotSpeaking ? 'Voly is speaking' : isRecording ? 'Listening' : 'Ready when you are'
+    const isSessionActive = isRecording || isConnecting
+    const agentState = isConnecting
+      ? 'Connecting...'
+      : isBotSpeaking
+        ? 'Voly is speaking'
+        : isRecording
+          ? 'Listening'
+          : 'Ready when you are'
 
     return (
       <main className="voly-demo">
@@ -459,13 +618,17 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
             <div className="voly-demo__orb-wrap">
               <span className="voly-demo__orbit voly-demo__orbit--outer" />
               <span className="voly-demo__orbit voly-demo__orbit--inner" />
-              <button className="voly-demo__orb" onClick={isRecording ? stop : start} aria-label={isRecording ? 'Stop voice demo' : 'Start voice demo'}>
-                {isRecording ? <span className="voly-demo__stop-icon" /> : <span className="voly-demo__mic-icon">⌁</span>}
+              <button
+                className={`voly-demo__orb ${isConnecting ? 'is-connecting' : ''}`}
+                onClick={isSessionActive ? stop : start}
+                aria-label={isSessionActive ? 'Stop voice demo' : 'Start voice demo'}
+              >
+                {isSessionActive ? <span className="voly-demo__stop-icon" /> : <span className="voly-demo__mic-icon">⌁</span>}
               </button>
             </div>
             <div className="voly-demo__voice-copy">
               <strong>{agentState}</strong>
-              <span>{isRecording ? 'Tap the button when you’re done' : 'Tap to start a conversation'}</span>
+              <span>{isSessionActive ? 'Tap the button when you’re done' : 'Tap to start a conversation'}</span>
             </div>
           </div>
 
@@ -495,10 +658,10 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
   return (
     <div>
       <div style={{ marginBottom: 20 }}>
-        <button onClick={start} disabled={isRecording}>
-          {isRecording ? 'Recording…' : 'Start'}
+        <button onClick={start} disabled={isRecording || isConnecting}>
+          {isConnecting ? 'Connecting…' : isRecording ? 'Recording…' : 'Start'}
         </button>
-        <button onClick={stop} disabled={!isRecording} style={{ marginLeft: 10 }}>
+        <button onClick={stop} disabled={!isRecording && !isConnecting} style={{ marginLeft: 10 }}>
           Stop
         </button>
 

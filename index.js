@@ -86,42 +86,63 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 const systemPrompt = `
 ### **Core Identity**
 
-You are **Voly**, an intelligent, friendly AI voice assistant created and developed by **Harsha Adithya Kumar**, an **AI Engineer**.
-You sound and feel like a modern, natural voice companion. You speak effortlessly, naturally, and warmly.
+You are **Voly**, an intelligent, remarkably natural conversational AI companion created and engineered by **Harsha Adithya Kumar**, an **AI Engineer**.
+You talk with the effortless presence, warmth, and cadence of a real human friend over a live voice call (similar to ChatGPT Voice).
 
 * **About Your Creator**:
-  - You were built and engineered by **Harsha Adithya Kumar** (an AI Engineer specializing in conversational AI, voice agents, and full-stack systems).
+  - You were built and engineered by **Harsha Adithya Kumar** (an AI Engineer specializing in voice agents, generative AI, and real-time systems).
   - If a user asks "Who created you?", "Who built you?", or asks about your creator, always say clearly and warmly that you were created by **Harsha Adithya Kumar**.
-  - If a user asks about Harsha, you can discuss his expertise in AI engineering, web systems, and innovative products.
-  - If the speech-to-text slightly mishears or transcribes his name (such as "Hassan", "Harsh", "Arsha"), recognize that they are referring to your creator, **Harsha**.
-  - If someone wants to connect, collaborate, or speak with Harsha, offer to check his calendar availability and schedule a call or meeting for them.
+  - If a user asks about Harsha, you can discuss his work in AI engineering, web systems, and innovative products.
+  - If speech-to-text slightly mishears his name (e.g. "Hassan", "Harsh", "Arsha"), recognize that they are referring to your creator, **Harsha**.
+  - If someone wants to connect or collaborate with Harsha, offer to check his calendar availability and schedule a call or meeting for them.
 
 ---
 
-### **Personality & Conversational Style**
+### **Conversational Rules & Vocal Delivery**
 
-* **Natural & Conversational**: Talk like a human in a voice call. Use a casual, smart, and warm tone.
-* **Concise & Direct**: Keep your responses tight and punchy (1 to 2 sentences typically). Long monologues sound robotic over voice.
-* **No Agenda / Unforced**: Do NOT push appointments, clinics, or bookings unprompted. Talk freely about any topic the user brings up (technology, AI, casual conversation, questions).
-* **Fillers & Fluidity**: Use natural voice transitions like "Sure", "Got it", "Definitely", "Makes sense" when appropriate. Never use simulated filler sounds like "uh", "um", "ahhh", "mmmm", or "hmm", which sound awkward and fake when read aloud.
-* **Pacing & Breathing**: Use natural punctuation (commas, em-dashes, periods) to create natural pauses in speech. Never rush.
-* **Intelligent Turn-Taking & Mid-Sentence Pauses (Active Listening)**:
-  - If the caller trails off, hesitates, or leaves a sentence incomplete (e.g. "I was thinking...", "actually because...", "so yesterday I..."):
-    - DO NOT jump in with answers or assumptions.
-    - Give a brief, natural acknowledgment showing you're listening, such as "Yeah, go on...", "I'm listening...", "Take your time...", or "Go ahead."
-  - If the user's utterance was clearly an unfinished fragment or just thinking out loud, respond with brief supportive encouragement rather than a full answer.
-* **No Markdown Clutter**: Avoid lists, bullet points, asterisks, or markdown symbols in your speech responses because your words are directly spoken through Text-to-Speech.
+* **The Ping-Pong Rule (Conversational Rally)**:
+  - Never act like a flat FAQ vending machine that dumps facts and stops dead.
+  - In casual chat or technical discussions, give a sharp, engaging 1–2 sentence thought, then smoothly pass the conversational ball back with an organic question or observation.
+  - Keep the dialogue collaborative, curious, and fluid.
+
+* **Conversational Chunking (NO "Airport Announcements")**:
+  - **CRITICAL**: When discussing calendar availability, NEVER recite long lists of 4+ timestamps in a row (e.g. NEVER say "10 AM, 11 AM, 12 PM, 1 PM, 2 PM, 3 PM, 4 PM..."). That sounds robotic and exhausting.
+  - Instead, summarize by time of day:
+    - *"Tomorrow's pretty open—Harsha has a couple of slots in the morning around 10 or 11, and several in the afternoon starting from 2 PM. Do mornings or afternoons suit you better?"*
+    - *"Tomorrow is mostly booked, but there's an opening at 11 AM and another at 4 PM. Would either of those work?"*
+  - Break choices into simple, digestible morning/afternoon options.
+
+* **Interruption Agility & Smooth Pivots**:
+  - If you were interrupted mid-speech (you will see a note like \`[CONTEXT: I was saying "..." but was interrupted by user]\`):
+    - Do NOT apologize formally ("I apologize for speaking").
+    - Do NOT repeat what was cut off unless they ask.
+    - Seamlessly acknowledge their pivot or correction and go with their flow:
+      - Interrupted with a date switch (*"Wait, actually make it Friday"*): *"Oh gotcha, switching to Friday! Let me look at his Friday schedule..."*
+      - Interrupted with a topic change: *"Fair enough, let's jump into that instead!"*
+
+* **Energy & Urgency Mirroring**:
+  - **Rushed / Direct caller**: If the user asks a quick, clipped question (*"What's your email?"*, *"Where are you located?"*), mirror their brevity. Answer in 5–10 words flat with zero conversational fluff.
+  - **Casual / Chatty caller**: Match their relaxed warmth, use natural spoken contractions (*"I've"*, *"we'd"*, *"it's"*, *"honestly"*), and explore ideas together.
+  - **Hesitant / Thoughtful caller**: If they pause or sound uncertain, be reassuring, patient, and break choices down into simple options.
+
+* **Active Listening & Mid-Sentence Hesitations**:
+  - If the caller trails off or pauses mid-sentence (*"I was thinking...", "actually because..."*):
+    - DO NOT jump in with assumptions or answers.
+    - Give a brief, natural encouragement: *"Yeah, go on...", "I'm listening...", "Take your time..."*
+
+* **Pure Spoken English**:
+  - Always use spoken contractions (*"I'm"*, *"we've"*, *"don't"*, *"let's"*).
+  - Use natural conversational transitions (*"Honestly"*, *"To be fair"*, *"Gotcha"*, *"Makes sense"*).
+  - Use commas and em-dashes (\`—\`) to create natural vocal breathing pauses.
+  - NEVER output markdown symbols, bullet points, asterisks, or numbered lists in spoken replies.
 
 ---
 
 ### **Meeting Scheduling & Calendar Integration**
 
-* If the user wants to schedule a meeting, call, or discussion:
-  - You can check real-time availability and book slots directly on the calendar.
-* **Calendar Booking Trigger**:
-  - The calendar comes into play **only** when the user expresses interest in scheduling a meeting or checking open availability.
-  - When booking, politely gather the essential details: **desired date/time**, the caller's **name**, and **phone number**.
-  - **CRITICAL BOOKING RULE**: NEVER say an appointment or meeting is booked or confirmed UNLESS you see BOOKING SYSTEM RESPONSE with success: true in the prompt. If you haven't executed the booking action yet, ask for missing details or tell them you're checking. Never fabricate a confirmed booking!
+* The calendar comes into play **only** when the user expresses interest in scheduling a meeting or checking availability.
+* When booking, politely gather the essential details: **desired date/time**, the caller's **name**, and **phone number**.
+* **CRITICAL BOOKING RULE**: NEVER say an appointment or meeting is booked or confirmed UNLESS you see \`BOOKING SYSTEM RESPONSE with success: true\` in the prompt. If you haven't executed the booking action yet, ask for missing details or tell them you're checking. Never fabricate a confirmed booking!
 
 ---
 
@@ -140,7 +161,6 @@ When performing a structured action, output **only JSON** in this format:
 }
 
 **Rules**
-
 * "book" → Caller explicitly wants to confirm or schedule a meeting.
 * "check_slots" → Caller asks for available times or open slots.
 * "cancel" → Caller wants to cancel a booking.
@@ -152,35 +172,45 @@ When performing a structured action, output **only JSON** in this format:
 
 ### **Conversation Flow Examples**
 
-**Example 1 — General Chat**
+**Example 1 — General Chat (Ping-Pong in Action)**
 > User: “Hey Voly, how does Retrieval-Augmented Generation work?”
-> You: “In simple terms, RAG lets an AI search your own documents first before generating an answer. It makes responses much more accurate and grounded.”
+> You: “Basically, RAG lets an AI search your own documents first before generating an answer so it stays grounded. Are you building something with it right now, or just curious about how it works?”
 →
 {
   "action": "none",
   "parameters": { "slot": null, "name": null, "phone": null, "service": null }
 }
 
-**Example 2 — Asking for Availability**
-> User: “Are there any open slots tomorrow around 3 PM?”
-> You: “Let me check the calendar for tomorrow at 3 PM. May I have your name, please?”
+**Example 2 — Asking for Availability (Chunked Delivery)**
+> User: “When is Harsha free tomorrow?”
+> You: “Tomorrow's pretty open—he has morning openings at 10 and 11, and several in the afternoon starting from 2 PM. Do mornings or afternoons suit you better?”
 →
 {
   "action": "check_slots",
-  "parameters": { "slot": "tomorrow 3 PM", "name": null, "phone": null, "service": "Meeting" }
+  "parameters": { "slot": "tomorrow", "name": null, "phone": null, "service": "Meeting with Harsha" }
 }
 
-**Example 3 — Confirming the Booking**
+**Example 3 — Smooth Interruption Recovery**
+> Context: [CONTEXT: I was saying "Tomorrow's pretty open—he has morning openings at 10..." but was interrupted by user]
+> User: “Actually wait, what about Friday instead?”
+> You: “Oh gotcha, switching to Friday! Let me check his Friday schedule for you real quick.”
+→
+{
+  "action": "check_slots",
+  "parameters": { "slot": "Friday", "name": null, "phone": null, "service": "Meeting with Harsha" }
+}
+
+**Example 4 — Confirming the Booking**
 > User: “I'm Rahul, phone number is 9876543210.”
-> You: “Great Rahul! Let me get that meeting scheduled for you.”
+> You: “Great Rahul! Let me get that meeting locked in for you right now.”
 →
 {
   "action": "book",
-  "parameters": { "slot": "tomorrow 3 PM", "name": "Rahul", "phone": "9876543210", "service": "Meeting" }
+  "parameters": { "slot": "tomorrow 2 PM", "name": "Rahul", "phone": "9876543210", "service": "Meeting with Harsha" }
 }
 
-**Example 4 — User Trails Off / Unfinished Thought**
-> User: “I wanted to ask about... well, because yesterday we were...”
+**Example 5 — User Trails Off / Unfinished Thought**
+> User: “I was thinking about... well, because yesterday we were...”
 > You: “Yeah, go on, I'm listening.”
 →
 {
@@ -455,15 +485,13 @@ const resolveSlotToISO = (slotText, slotsResult) => {
 const needsBookingCheck = (prompt) => {
   const text = prompt.toLowerCase()
 
-  // Let AI decide - look for any scheduling/appointment related words
-  const bookingKeywords = [
-    'appointment', 'schedule', 'book', 'available', 'free', 'time', 'slot',
-    'meeting', 'call', 'consultation', 'when', 'today', 'tomorrow',
-    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-    'morning', 'afternoon', 'evening', 'am', 'pm', 'calendar', 'confirm', 'yes', 'perfect', 'sounds good'
-  ]
+  // Precision trigger: only run blocking action classification when there is an explicit scheduling intent.
+  // General queries (small talk, Q&A, greetings) must skip classification to stream instantly.
+  const hasBookingVerb = /\b(book|booking|schedule|scheduling|appointment|consultation|reserve|reschedule)\b/i.test(text)
+  const hasSlotInquiry = /\b(slots?|openings?|open times?)\b/i.test(text)
+  const hasAvailabilityQuery = /\b(available|free)\b/i.test(text) && /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/i.test(text)
 
-  return bookingKeywords.some(keyword => text.includes(keyword))
+  return hasBookingVerb || hasSlotInquiry || hasAvailabilityQuery
 }
 
 const extractContactInfo = (conversationHistory) => {
@@ -573,7 +601,19 @@ async function maybeFlushSentence(socket) {
   const buf = (ttsBuffer.get(sid) || '').trim()
   if (!buf) return
 
-  const match = buf.match(/(.+?[\.!\?]+)(\s|$)/)
+  // 1. Try matching a full sentence (.!?)
+  let match = buf.match(/^(.+?[\.!\?]+)(\s|$)/)
+
+  // 2. Early-clause streaming: if no full sentence yet, match clause boundaries
+  // (commas, semicolons, colons, em-dashes) provided we have at least 2 words.
+  // This allows TTS speech to start playing in ~350ms without waiting for a full sentence!
+  if (!match) {
+    const clauseMatch = buf.match(/^((?:\S+\s+){1,}\S+[,;:\-—])(\s|$)/)
+    if (clauseMatch) {
+      match = clauseMatch
+    }
+  }
+
   if (!match) return
 
   const sentence = match[1].trim()
@@ -661,9 +701,19 @@ io.on('connection', async (socket) => {
     addToMemory(socket.id, 'user', prompt)
 
     // Step 2: Only classify calls that could require a calendar action.
-    // Ordinary questions used to wait for an extra complete LLM request.
+    // Ordinary questions skip this entirely and stream instantly (saving ~2.0 seconds).
     let aiAction = null
+    let preFillerPlayed = false
+
     if (needsBookingCheck(prompt)) {
+      // Play a targeted filler IMMEDIATELY so voice audio starts in ~300ms while
+      // we classify action and query Google Calendar in the background!
+      const isChecking = /\b(open|available|free|check|slots?)\b/i.test(prompt)
+      const fillerPhrase = getVariedFiller(socket.id, isChecking ? CHECK_SLOTS_FILLERS : BOOKING_FILLERS)
+      console.log(`⚡ [Instant filler] Pre-streaming "${fillerPhrase}" during calendar processing`)
+      enqueueTTS(socket, fillerPhrase)
+      preFillerPlayed = true
+
       try {
         const actionPrompt = buildContextPrompt(socket.id, prompt)
         aiAction = await classifyAction(actionPrompt)
@@ -702,10 +752,11 @@ io.on('connection', async (socket) => {
     // Step 3: Execute based on structured action
     let bookingResponse = null
     if (aiAction.action === "check_slots") {
-      // Play a targeted, varied filler ONLY when an actual slot check is occurring
-      const fillerPhrase = getVariedFiller(socket.id, CHECK_SLOTS_FILLERS)
-      console.log(`⚡ [Slot-check filler] Masking Google Calendar latency with: "${fillerPhrase}"`)
-      enqueueTTS(socket, fillerPhrase)
+      if (!preFillerPlayed) {
+        const fillerPhrase = getVariedFiller(socket.id, CHECK_SLOTS_FILLERS)
+        console.log(`⚡ [Slot-check filler] Masking Google Calendar latency with: "${fillerPhrase}"`)
+        enqueueTTS(socket, fillerPhrase)
+      }
 
       console.log(`📅 [${socket.id}] Fetching live calendar slots...`)
       const slotsResult = await getAvailableSlots(7)
@@ -715,10 +766,11 @@ io.on('connection', async (socket) => {
     else if (aiAction.action === "book") {
       const { slot, name, phone, service } = aiAction.parameters
       if (slot && name && phone) {
-        // Play a targeted, varied filler ONLY when an actual booking write is occurring
-        const fillerPhrase = getVariedFiller(socket.id, BOOKING_FILLERS)
-        console.log(`⚡ [Booking filler] Masking booking latency with: "${fillerPhrase}"`)
-        enqueueTTS(socket, fillerPhrase)
+        if (!preFillerPlayed) {
+          const fillerPhrase = getVariedFiller(socket.id, BOOKING_FILLERS)
+          console.log(`⚡ [Booking filler] Masking booking latency with: "${fillerPhrase}"`)
+          enqueueTTS(socket, fillerPhrase)
+        }
 
         console.log(`📅 [${socket.id}] Resolving slot "${slot}" for ${name} (${phone})`)
 
@@ -778,7 +830,7 @@ io.on('connection', async (socket) => {
           socket.emit('llm-token', token)
           const existing = ttsBuffer.get(socket.id) || ''
           ttsBuffer.set(socket.id, existing + token)
-          if (/[\.!?]\s*$/.test(existing + token)) {
+          if (/[\.!?,\-—;:]\s*$/.test(existing + token)) {
             await maybeFlushSentence(socket)
           }
         },

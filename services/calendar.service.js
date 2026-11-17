@@ -181,8 +181,9 @@ export async function bookSlot(startISO, name, phone, service = 'Appointment') {
 }
 
 /**
- * Convert the slots result into a compact, voice-friendly string for the AI.
- * Example: "Tuesday, Nov 11: 10:00 AM, 11:00 AM, 2:00 PM | Wednesday, Nov 12: 10:00 AM"
+ * Convert the slots result into a voice-friendly, time-of-day grouped string for the AI.
+ * Groups slots by Morning, Afternoon, and Evening so the AI can summarize naturally
+ * rather than reciting a robotic list of 10 timestamps.
  */
 export function formatSlotsForAI(slotsResult) {
   if (!slotsResult.success || !slotsResult.slots) {
@@ -192,7 +193,37 @@ export function formatSlotsForAI(slotsResult) {
   if (entries.length === 0) {
     return 'No available slots in the next 7 days.'
   }
+
   return entries
-    .map(([day, slots]) => `${day}: ${slots.map(s => s.label).join(', ')}`)
-    .join(' | ')
+    .map(([day, slots]) => {
+      const morning = slots.filter(s => {
+        // Evaluate hour in IST (+05:30)
+        const d = new Date(s.startISO)
+        const utcHour = d.getUTCHours()
+        const istHour = (utcHour + 5 + (d.getUTCMinutes() + 30 >= 60 ? 1 : 0)) % 24
+        return istHour < 12
+      }).map(s => s.label)
+
+      const afternoon = slots.filter(s => {
+        const d = new Date(s.startISO)
+        const utcHour = d.getUTCHours()
+        const istHour = (utcHour + 5 + (d.getUTCMinutes() + 30 >= 60 ? 1 : 0)) % 24
+        return istHour >= 12 && istHour < 16
+      }).map(s => s.label)
+
+      const evening = slots.filter(s => {
+        const d = new Date(s.startISO)
+        const utcHour = d.getUTCHours()
+        const istHour = (utcHour + 5 + (d.getUTCMinutes() + 30 >= 60 ? 1 : 0)) % 24
+        return istHour >= 16
+      }).map(s => s.label)
+
+      const groups = []
+      if (morning.length) groups.push(`Morning: ${morning.join(', ')}`)
+      if (afternoon.length) groups.push(`Afternoon: ${afternoon.join(', ')}`)
+      if (evening.length) groups.push(`Late Afternoon/Evening: ${evening.join(', ')}`)
+
+      return `${day} (${slots.length} open slots -> ${groups.join(' | ')})`
+    })
+    .join('\n')
 }
