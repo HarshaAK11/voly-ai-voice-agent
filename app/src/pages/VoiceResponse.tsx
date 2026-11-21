@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createClient } from '@deepgram/sdk'
+import { DeepgramClient } from '@deepgram/sdk'
 import { io, type Socket } from 'socket.io-client'
 import { usePCMAudio } from '../hooks/usePCMAudio'
 import { BACKEND_URL } from '../config/backend'
@@ -222,8 +222,7 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
 
     // Clean up stale / closed socket
     if (socketRef.current) {
-      try { socketRef.current.finish?.() } catch {}
-      try { socketRef.current.removeAllListeners?.() } catch {}
+      try { socketRef.current.close?.() } catch {}
       socketRef.current = null
     }
 
@@ -235,15 +234,16 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       token = await getToken()
     }
 
-    const client = createClient({ accessToken: token })
+    const client = new DeepgramClient({ accessToken: token })
     clientRef.current = client
-    const socket = client.listen.live({
+    const socket = await client.listen.v1.connect({
       model: 'nova',
-      smart_format: true,
-      interim_results: true,
+      smart_format: 'true',
+      interim_results: 'true',
       endpointing: 250,        // Deepgram acoustic silence detector (250ms)
       utterance_end_ms: 1000,  // Full conversational turn boundary
-      vad_events: true,
+      vad_events: 'true',
+      connectionTimeoutInSeconds: 7,
     })
 
     const dispatchTurn = () => {
@@ -270,7 +270,7 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       }
     }
 
-    socket.on('Results', (data: any) => {
+    const handleResults = (data: any) => {
       const text = data?.channel?.alternatives?.[0]?.transcript || ''
       const isSpeechFinal = Boolean(data?.speech_final)
       const isFinal = Boolean(
@@ -300,13 +300,22 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
           turnTimeoutRef.current = setTimeout(dispatchTurn, debounceMs)
         }
       }
-    })
+    }
 
     // When Deepgram detects true acoustic end of utterance, flush immediately
-    socket.on('UtteranceEnd', () => {
+    const handleUtteranceEnd = () => {
       if (pendingUtteranceRef.current.trim()) {
         console.log('⚡ [Deepgram UtteranceEnd] Immediate acoustic flush')
         dispatchTurn()
+      }
+    }
+
+    // v5 delivers every server frame through the single "message" event.
+    socket.on('message', (message: any) => {
+      if (message?.type === 'Results') {
+        handleResults(message)
+      } else if (message?.type === 'UtteranceEnd') {
+        handleUtteranceEnd()
       }
     })
 
@@ -323,24 +332,8 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
     })
 
     // Wait until WebSocket handshake is fully open before returning so openMic doesn't drop frames
-    await new Promise<void>((resolve, reject) => {
-      if (isSocketAlive(socket)) return resolve()
-
-      const timer = setTimeout(() => {
-        reject(new Error('Deepgram socket connection timed out'))
-      }, 7000)
-
-      socket.on('open', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-
-      socket.on('error', (err: any) => {
-        clearTimeout(timer)
-        cachedTokenRef.current = null
-        reject(err)
-      })
-    })
+    socket.connect()
+    await socket.waitForOpen()
 
     socketRef.current = socket
     return socket
@@ -402,7 +395,7 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
       if (e.data && e.data.size > 0 && socket) {
         try {
           if (isSocketAlive(socket)) {
-            socket.send(e.data)
+            socket.sendMedia(e.data)
           }
         } catch (err) {
           console.error('Failed to send audio chunk to Deepgram:', err)
@@ -508,8 +501,7 @@ const VoiceResponse = ({ mode }: VoiceResponseProps) => {
 
     // 4. Cleanly finish & reset Deepgram live socket
     if (socketRef.current) {
-      try { socketRef.current.finish?.() } catch {}
-      try { socketRef.current.removeAllListeners?.() } catch {}
+      try { socketRef.current.close?.() } catch {}
       socketRef.current = null
     }
 

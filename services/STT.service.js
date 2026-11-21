@@ -1,14 +1,13 @@
 import dotenv from 'dotenv'
 dotenv.config()
 
-import { createClient } from "@deepgram/sdk"
+import { DeepgramClient } from "@deepgram/sdk"
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY)
+const deepgram = new DeepgramClient({ apiKey: process.env.DEEPGRAM_API_KEY })
 
 export const speechToText = async (req, res) => {
   try {
-    const { result, error } = await deepgram.auth.grantToken()
-    if (error) throw error
+    const result = await deepgram.auth.v1.tokens.grant()
     res.json(result)
   } catch (error) {
     console.error('Error generating token:', error)
