@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { readdir, readFile } from 'node:fs/promises'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { PCMStreamer, streamTTSAsPCM } from '../services/PCMStreamer.service.js'
 
@@ -67,4 +70,45 @@ test('ElevenLabs streaming TTS uses a non-deprecated model and PCM output', asyn
     if (originalVoiceId === undefined) delete process.env.ELEVENLABS_VOICE_ID
     else process.env.ELEVENLABS_VOICE_ID = originalVoiceId
   }
+})
+
+// Guard the whole source tree, not just the TTS call site: no file may send
+// requests to the deprecated music or sound-generation models/endpoints.
+test('no source file references deprecated ElevenLabs music or sound models', async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const scanRoots = ['index.js', 'services', 'app/src']
+  const deprecated = ['music_v1', 'eleven_text_to_sound_v2', '/v1/music', '/v1/sound-generation']
+  const offenders = []
+
+  async function checkFile(relative) {
+    if (!/\.(js|jsx|ts|tsx|mjs|cjs)$/.test(relative)) return
+    const contents = await readFile(path.join(repoRoot, relative), 'utf8')
+    for (const token of deprecated) {
+      if (contents.includes(token)) offenders.push(`${relative}: ${token}`)
+    }
+  }
+
+  async function walk(target) {
+    const entries = await readdir(path.join(repoRoot, target), { withFileTypes: true })
+    for (const entry of entries) {
+      const relative = path.join(target, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === 'dist') continue
+        await walk(relative)
+        continue
+      }
+      await checkFile(relative)
+    }
+  }
+
+  for (const target of scanRoots) {
+    const entries = await readdir(path.join(repoRoot, target), { withFileTypes: true }).catch(() => null)
+    if (entries === null) {
+      await checkFile(target)
+      continue
+    }
+    await walk(target)
+  }
+
+  assert.deepEqual(offenders, [], `deprecated ElevenLabs resources still referenced:\n${offenders.join('\n')}`)
 })
