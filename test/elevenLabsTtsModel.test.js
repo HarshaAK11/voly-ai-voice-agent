@@ -49,6 +49,8 @@ test('ElevenLabs streaming TTS uses a non-deprecated model and PCM output', asyn
     assert.ok(captured, 'expected the TTS request to be made')
     assert.match(captured.url, /^https:\/\/api\.elevenlabs\.io\/v1\/text-to-speech\/test-voice\/stream\?/)
     assert.match(captured.url, /output_format=pcm_24000/)
+    assert.doesNotMatch(captured.url, /\/v1\/music/)
+    assert.doesNotMatch(captured.url, /\/v1\/sound-generation/)
     assert.equal(captured.options.method, 'POST')
     assert.equal(captured.options.headers['xi-api-key'], 'test-key')
 
@@ -60,6 +62,63 @@ test('ElevenLabs streaming TTS uses a non-deprecated model and PCM output', asyn
 
     assert.ok(events.some(({ event }) => event === 'pcm-chunk'))
     assert.ok(events.some(({ event }) => event === 'pcm-end'))
+  } finally {
+    globalThis.fetch = originalFetch
+    PCMStreamer.prototype.startPCMStream = originalStartPCMStream
+
+    if (originalApiKey === undefined) delete process.env.ELEVENLABS_API_KEY
+    else process.env.ELEVENLABS_API_KEY = originalApiKey
+
+    if (originalVoiceId === undefined) delete process.env.ELEVENLABS_VOICE_ID
+    else process.env.ELEVENLABS_VOICE_ID = originalVoiceId
+  }
+})
+
+// When TTS fails, the service must surface the error instead of retrying with
+// the deprecated music_v1 or eleven_text_to_sound_v2 resources.
+test('a failed ElevenLabs TTS request does not fall back to deprecated resources', async () => {
+  const originalFetch = globalThis.fetch
+  const originalStartPCMStream = PCMStreamer.prototype.startPCMStream
+  const originalApiKey = process.env.ELEVENLABS_API_KEY
+  const originalVoiceId = process.env.ELEVENLABS_VOICE_ID
+
+  const calls = []
+  const events = []
+
+  try {
+    process.env.ELEVENLABS_API_KEY = 'test-key'
+    process.env.ELEVENLABS_VOICE_ID = 'test-voice'
+    PCMStreamer.prototype.startPCMStream = async () => {}
+
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, options })
+      return {
+        ok: false,
+        status: 400,
+        body: null,
+        text: async () => 'synthetic upstream error'
+      }
+    }
+
+    const socket = {
+      emit: (event, ...args) => events.push({ event, args })
+    }
+
+    await streamTTSAsPCM(socket, 'Hello from the test caller.', undefined)
+
+    assert.equal(calls.length, 1, 'expected exactly one ElevenLabs request')
+    assert.match(calls[0].url, /\/v1\/text-to-speech\//)
+    assert.doesNotMatch(calls[0].url, /\/v1\/music/)
+    assert.doesNotMatch(calls[0].url, /\/v1\/sound-generation/)
+
+    const body = JSON.parse(calls[0].options.body)
+    assert.notEqual(body.model_id, 'music_v1')
+    assert.notEqual(body.model_id, 'eleven_text_to_sound_v2')
+
+    assert.ok(
+      events.some(({ event, args }) => event === 'error' && /ElevenLabs API error/.test(args[0])),
+      'expected the upstream failure to be reported to the client'
+    )
   } finally {
     globalThis.fetch = originalFetch
     PCMStreamer.prototype.startPCMStream = originalStartPCMStream
